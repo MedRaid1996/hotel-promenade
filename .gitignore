@@ -1,0 +1,7 @@
+node_modules/
+database.db
+.env
+.railway/
+uploads/
+runtime/
+extract_pdf.py

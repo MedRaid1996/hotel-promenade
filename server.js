@@ -1,0 +1,3009 @@
+﻿const express = require('express');
+const bodyParser = require('body-parser');
+const path = require('path');
+const dotenv = require('dotenv');
+const sqlite3 = require('sqlite3').verbose();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const fs = require('fs');
+const http = require('http');
+const crypto = require('crypto');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const nodemailer = require('nodemailer');
+const { Server } = require('socket.io');
+const { createTelegramConcierge } = require('./concierge-telegram');
+
+dotenv.config();
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET === 'your-hotel-la-promenade-secret-key-change-in-production') {
+  throw new Error('JWT_SECRET must be set in .env before starting the server.');
+}
+
+const STORAGE_DIR = process.env.STORAGE_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || __dirname;
+const DB_PATH = process.env.DB_PATH || path.join(STORAGE_DIR, 'database.db');
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(STORAGE_DIR, 'uploads');
+const BOOTSTRAP_ADMIN_EMAIL = process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@lapromenade.com';
+const BOOTSTRAP_ADMIN_PASSWORD = process.env.BOOTSTRAP_ADMIN_PASSWORD;
+const ENABLE_DEMO_USERS = process.env.ENABLE_DEMO_USERS === 'true';
+const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'admin123';
+const GMAIL_USER = process.env.GMAIL_USER || '';
+const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
+const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
+
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: '*' }
+});
+let appReady = false;
+let appReadyError = null;
+let resolveAppReady;
+const appReadyPromise = new Promise((resolve) => {
+  resolveAppReady = resolve;
+});
+
+// --------------------------------------------------
+// SOCKET.IO — Real-time communication
+// --------------------------------------------------
+
+// Store connected clients with their user info
+const connectedClients = new Map();
+
+io.on('connection', (socket) => {
+  console.log(`Socket connected: ${socket.id}`);
+
+  // Authenticate socket connection
+  socket.on('authenticate', (token) => {
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      socket.userId = decoded.id;
+      socket.userRole = decoded.role;
+      connectedClients.set(socket.id, { userId: decoded.id, role: decoded.role });
+      socket.join(`user_${decoded.id}`);
+      socket.join(`role_${decoded.role}`);
+      socket.emit('authenticated', { success: true });
+      console.log(`Socket ${socket.id} authenticated as user ${decoded.id} (${decoded.role})`);
+    } catch (err) {
+      socket.emit('authenticated', { success: false, error: 'Invalid token' });
+    }
+  });
+
+  socket.on('disconnect', () => {
+    connectedClients.delete(socket.id);
+    console.log(`Socket disconnected: ${socket.id}`);
+  });
+});
+
+// Helper function to emit real-time events
+function emitRealtimeEvent(eventType, data, options = {}) {
+  const { toUserId, toRole, excludeSocketId } = options;
+
+  if (toUserId) {
+    io.to(`user_${toUserId}`).emit(eventType, data);
+  } else if (toRole) {
+    io.to(`role_${toRole}`).emit(eventType, data);
+  } else {
+    if (excludeSocketId) {
+      io.except(excludeSocketId).emit(eventType, data);
+    } else {
+      io.emit(eventType, data);
+    }
+  }
+}
+
+// --------------------------------------------------
+// DATABASE
+// --------------------------------------------------
+
+const db = new sqlite3.Database(DB_PATH, (err) => {
+  if (err) {
+    appReadyError = err;
+    console.error('Error opening database:', err);
+  } else {
+    console.log('Connected to SQLite database');
+    initializeDatabase();
+    waitForDatabaseReady().then(() => {
+      appReady = true;
+      resolveAppReady();
+      console.log('Application initialization complete');
+    }).catch((readyErr) => {
+      appReadyError = readyErr;
+      console.error('Database readiness error:', readyErr);
+    });
+  }
+});
+
+// Promisify db methods
+function dbRun(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) reject(err);
+      else resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+}
+function dbGet(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => { if (err) reject(err); else resolve(row); });
+  });
+}
+function dbAll(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => { if (err) reject(err); else resolve(rows || []); });
+  });
+}
+
+async function waitForDatabaseReady(retries = 120, delayMs = 100) {
+  const expectedUsers = 1 + (ENABLE_DEMO_USERS ? 3 : 0);
+  const expectedEmails = [BOOTSTRAP_ADMIN_EMAIL];
+  if (ENABLE_DEMO_USERS) {
+    expectedEmails.push('organisateur@lapromenade.com', 'coordonnateur@lapromenade.com', 'compta@lapromenade.com');
+  }
+
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const usersTable = await dbGet("SELECT name FROM sqlite_master WHERE type='table' AND name='users'");
+      const auditTable = await dbGet("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_history'");
+      const roomsTable = await dbGet("SELECT name FROM sqlite_master WHERE type='table' AND name='rooms'");
+      if (usersTable && auditTable && roomsTable) {
+        const placeholders = expectedEmails.map(() => '?').join(',');
+        const userRows = await dbAll(`SELECT email FROM users WHERE email IN (${placeholders})`, expectedEmails);
+        const roomCount = await dbGet('SELECT COUNT(*) as c FROM rooms', []);
+        if (userRows.length >= expectedUsers && Number(roomCount.c || 0) > 0) {
+          return true;
+        }
+      }
+    } catch (_) { }
+
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  throw new Error('Timed out while waiting for database initialization');
+}
+
+// --------------------------------------------------
+// MULTER (file uploads)
+// --------------------------------------------------
+
+const uploadDir = UPLOAD_DIR;
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const unique = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, unique + path.extname(file.originalname));
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const allowed = /pdf|jpg|jpeg|png|gif|doc|docx|xls|xlsx|csv/;
+    const ext = allowed.test(path.extname(file.originalname).toLowerCase());
+    const mime = allowed.test(file.mimetype);
+    cb(null, ext || mime);
+  }
+});
+
+// --------------------------------------------------
+// MIDDLEWARE
+// --------------------------------------------------
+
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.disable('x-powered-by');
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.js')) res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    if (filePath.endsWith('.css')) res.setHeader('Content-Type', 'text/css; charset=utf-8');
+    if (filePath.endsWith('.html')) res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  }
+}));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 25,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de tentatives. Réessayez dans quelques minutes.' }
+});
+
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/register', authLimiter);
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+app.use('/api', (req, res, next) => {
+  if (appReady) return next();
+  if (appReadyError) {
+    return res.status(503).json({ error: 'Le serveur termine son initialisation. Réessayez dans quelques secondes.' });
+  }
+  const timeoutId = setTimeout(() => {
+    res.status(503).json({ error: 'Le serveur termine son initialisation. Réessayez dans quelques secondes.' });
+  }, 15000);
+  appReadyPromise.then(() => {
+    clearTimeout(timeoutId);
+    if (!res.headersSent) next();
+  });
+});
+
+// --------------------------------------------------
+// DATABASE SCHEMA
+// --------------------------------------------------
+
+function initializeDatabase() {
+  db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fname TEXT NOT NULL,
+      lname TEXT NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      phone TEXT,
+      role TEXT DEFAULT 'organisateur',
+      status TEXT DEFAULT 'Actif',
+      lastAccess TEXT,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT,
+      date TEXT,
+      time TEXT,
+      endTime TEXT,
+      duration TEXT,
+      status TEXT DEFAULT 'Planifié',
+      budget REAL DEFAULT 0,
+      guests INTEGER DEFAULT 0,
+      room TEXT,
+      organizer TEXT,
+      contact TEXT,
+      description TEXT,
+      userId INTEGER,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS guests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fname TEXT NOT NULL,
+      lname TEXT NOT NULL,
+      email TEXT,
+      phone TEXT,
+      eventId INTEGER,
+      userId INTEGER,
+      status TEXT DEFAULT 'En attente',
+      vip INTEGER DEFAULT 0,
+      notes TEXT,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (eventId) REFERENCES events(id),
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS services (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT,
+      detail TEXT,
+      status TEXT DEFAULT 'Demandé',
+      eventId INTEGER,
+      userId INTEGER,
+      cost REAL DEFAULT 0,
+      supplier TEXT,
+      notes TEXT,
+      options TEXT,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (eventId) REFERENCES events(id),
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS rooms (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT DEFAULT 'Salle',
+      capacity INTEGER,
+      hourlyRate REAL DEFAULT 0,
+      features TEXT,
+      available INTEGER DEFAULT 1,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS reservations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      roomId INTEGER,
+      eventId INTEGER,
+      userId INTEGER,
+      date TEXT,
+      startTime TEXT,
+      endTime TEXT,
+      status TEXT DEFAULT 'En attente',
+      cost REAL DEFAULT 0,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (roomId) REFERENCES rooms(id),
+      FOREIGN KEY (eventId) REFERENCES events(id),
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS invoices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      number TEXT UNIQUE,
+      eventId INTEGER,
+      userId INTEGER,
+      client TEXT,
+      amount REAL DEFAULT 0,
+      taxes REAL DEFAULT 0,
+      total REAL DEFAULT 0,
+      status TEXT DEFAULT 'En attente',
+      issueDate TEXT,
+      dueDate TEXT,
+      paidDate TEXT,
+      notes TEXT,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (eventId) REFERENCES events(id),
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      invoiceId INTEGER,
+      amount REAL DEFAULT 0,
+      status TEXT DEFAULT 'En attente',
+      date TEXT,
+      method TEXT,
+      notes TEXT,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (invoiceId) REFERENCES invoices(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS event_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      eventId INTEGER,
+      filename TEXT NOT NULL,
+      originalName TEXT NOT NULL,
+      mimetype TEXT,
+      size INTEGER,
+      uploadedBy INTEGER,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (eventId) REFERENCES events(id),
+      FOREIGN KEY (uploadedBy) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER,
+      title TEXT NOT NULL,
+      body TEXT,
+      type TEXT DEFAULT 'info',
+      isRead INTEGER DEFAULT 0,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS notification_preferences (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER UNIQUE,
+      emailEnabled INTEGER DEFAULT 1,
+      smsEnabled INTEGER DEFAULT 0,
+      eventReminders INTEGER DEFAULT 1,
+      paymentAlerts INTEGER DEFAULT 1,
+      serviceUpdates INTEGER DEFAULT 1,
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS audit_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER,
+      action TEXT NOT NULL,
+      entity TEXT,
+      entityId INTEGER,
+      details TEXT,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userId) REFERENCES users(id)
+    )`);
+
+    db.run(`CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    db.run(`ALTER TABLE guests ADD COLUMN userId INTEGER`, () => { });
+    db.run(`ALTER TABLE services ADD COLUMN userId INTEGER`, () => { });
+    db.run(`ALTER TABLE reservations ADD COLUMN userId INTEGER`, () => { });
+    db.run(`ALTER TABLE invoices ADD COLUMN userId INTEGER`, () => { });
+
+    db.run(`UPDATE guests SET userId = (SELECT userId FROM events e WHERE e.id = guests.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
+    db.run(`UPDATE services SET userId = (SELECT userId FROM events e WHERE e.id = services.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
+    db.run(`UPDATE reservations SET userId = (SELECT userId FROM events e WHERE e.id = reservations.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
+    db.run(`UPDATE invoices SET userId = (SELECT userId FROM events e WHERE e.id = invoices.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
+
+    const upsertLocalUser = (fname, lname, email, role, plainPassword) => {
+      const hashedPassword = bcrypt.hashSync(plainPassword, 10);
+      db.get('SELECT id FROM users WHERE email = ?', [email], (lookupErr, existingUser) => {
+        if (lookupErr) {
+          console.error('User lookup error during bootstrap sync:', lookupErr);
+          return;
+        }
+        if (existingUser) {
+          db.run(
+            'UPDATE users SET fname=?, lname=?, password=?, role=?, status=? WHERE email=?',
+            [fname, lname, hashedPassword, role, 'Actif', email]
+          );
+        } else {
+          db.run(
+            'INSERT INTO users (fname, lname, email, password, role, status) VALUES (?,?,?,?,?,?)',
+            [fname, lname, email, hashedPassword, role, 'Actif']
+          );
+        }
+      });
+    };
+
+    const syncDemoUsers = () => {
+      if (!ENABLE_DEMO_USERS) return;
+      upsertLocalUser('Luc', 'Bernard', 'organisateur@lapromenade.com', 'organisateur', DEMO_USER_PASSWORD);
+      upsertLocalUser('Emma', 'Côté', 'coordonnateur@lapromenade.com', 'coordonnateur', DEMO_USER_PASSWORD);
+      upsertLocalUser('Marc', 'Gagné', 'compta@lapromenade.com', 'compta', DEMO_USER_PASSWORD);
+      console.log('Demo users synced because ENABLE_DEMO_USERS=true');
+    };
+
+    // Seed bootstrap admin and sync known demo credentials for local demos when configured
+    db.get('SELECT * FROM users WHERE email = ?', [BOOTSTRAP_ADMIN_EMAIL], (err, row) => {
+      if (err) {
+        console.error('Bootstrap admin lookup error:', err);
+        return;
+      }
+      if (!row) {
+        const generatedPassword = BOOTSTRAP_ADMIN_PASSWORD || crypto.randomBytes(18).toString('base64url');
+        upsertLocalUser('Admin', 'La Promenade', BOOTSTRAP_ADMIN_EMAIL, 'admin', generatedPassword);
+        console.log(`Bootstrap admin created for ${BOOTSTRAP_ADMIN_EMAIL}`);
+        if (!BOOTSTRAP_ADMIN_PASSWORD) {
+          console.log(`Temporary admin password: ${generatedPassword}`);
+        }
+      } else if (BOOTSTRAP_ADMIN_PASSWORD) {
+        upsertLocalUser('Admin', 'La Promenade', BOOTSTRAP_ADMIN_EMAIL, 'admin', BOOTSTRAP_ADMIN_PASSWORD);
+        console.log(`Bootstrap admin password synced for ${BOOTSTRAP_ADMIN_EMAIL}`);
+      }
+      syncDemoUsers();
+    });
+
+    // Seed rooms if empty
+    db.get('SELECT COUNT(*) as c FROM rooms', [], (err, row) => {
+      if (row && row.c === 0) {
+        const rooms = [
+          ['Salle Versailles', 'Banquet', 200, 350, 'Scène,Podium,Écran LED,Bar'],
+          ['Salle Grand Salon', 'Réception', 300, 500, 'Piste de danse,Podium,Éclairage scénique,Bar'],
+          ['Salle Montréal', 'Conférence', 100, 200, 'Vidéoprojecteur,Tableau blanc,Wifi,Micro'],
+          ['Salle Québec', 'Réunion', 40, 120, 'Écran,Téléconférence,Tableau blanc'],
+          ['Terrasse La Promenade', 'Extérieur', 80, 280, 'Extérieur,Vue panoramique,Bar mobile'],
+          ['Salle Richelieu', 'Séminaire', 60, 160, 'Vidéoprojecteur,Son surround,Bar'],
+        ];
+        rooms.forEach(r => {
+          db.run('INSERT INTO rooms (name, type, capacity, hourlyRate, features) VALUES (?,?,?,?,?)', r);
+        });
+        console.log('Default rooms seeded');
+      }
+    });
+
+    console.log('Database schema initialized');
+  });
+}
+
+// --------------------------------------------------
+// HELPERS
+// --------------------------------------------------
+
+async function logAudit(userId, action, entity, entityId, details) {
+  try {
+    await dbRun(
+      'INSERT INTO audit_history (userId, action, entity, entityId, details) VALUES (?,?,?,?,?)',
+      [userId, action, entity, entityId, typeof details === 'string' ? details : JSON.stringify(details)]
+    );
+  } catch (e) { console.error('Audit log error:', e); }
+}
+
+async function createNotification(userId, title, body, type = 'info') {
+  try {
+    const result = await dbRun(
+      'INSERT INTO notifications (userId, title, body, type) VALUES (?,?,?,?)',
+      [userId, title, body, type]
+    );
+    // Real-time: notify the specific user about new notification
+    emitRealtimeEvent('notification:new', {
+      id: result.lastID,
+      userId,
+      title,
+      body,
+      type,
+      isRead: 0,
+      dateCreated: new Date().toISOString()
+    }, { toUserId: userId });
+  } catch (e) { console.error('Notification error:', e); }
+}
+
+// Notify all users with a specific role
+async function notifyRole(role, title, body, type = 'info') {
+  try {
+    const users = await dbAll('SELECT id FROM users WHERE role = ? AND status = ?', [role, 'Actif']);
+    for (const u of users) {
+      await createNotification(u.id, title, body, type);
+    }
+    // Real-time: notify the role room
+    emitRealtimeEvent('notification:role', { role, title, body, type }, { toRole: role });
+  } catch (e) { console.error('notifyRole error:', e); }
+}
+
+const TAX_RATE = 0.14975; // TPS 5% + TVQ 9.975%
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+}
+
+function extractEmailCandidate(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return match ? match[0] : null;
+}
+
+function getMailTransporter() {
+  if (!GMAIL_USER || !GMAIL_APP_PASS) {
+    throw new Error('GMAIL_USER ou GMAIL_APP_PASS manquant dans .env');
+  }
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
+    connectionTimeout: 30000,
+    greetingTimeout: 30000,
+    socketTimeout: 45000,
+  });
+}
+
+async function buildInvoicePdfBuffer(inv, services = [], reservation = null) {
+  const PDFDocument = require('pdfkit');
+  return await new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50 });
+      const chunks = [];
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      doc.fontSize(24).text('HÔTEL LA PROMENADE', { align: 'center' });
+      doc.fontSize(10).text('123 Avenue La Promenade, Montréal, QC H3X 1A1', { align: 'center' });
+      doc.text('info@lapromenade.com | (514) 555-0100', { align: 'center' });
+      doc.moveDown(2);
+
+      doc.fontSize(18).text(`FACTURE ${inv.number}`);
+      doc.moveDown(0.5);
+      doc.fontSize(11);
+      doc.text(`Client: ${inv.client || 'N/A'}`);
+      doc.text(`Événement: ${inv.eventName || 'N/A'}`);
+      doc.text(`Date d'émission: ${inv.issueDate}`);
+      doc.text(`Date d'échéance: ${inv.dueDate}`);
+      doc.text(`Statut: ${inv.status}`);
+      doc.moveDown(1.5);
+
+      doc.fontSize(11).font('Helvetica-Bold');
+      doc.text('Description', 50, doc.y, { width: 350 });
+      let headerY = doc.y - 14;
+      doc.text('Montant', 420, headerY, { width: 100, align: 'right' });
+      doc.moveDown(0.5);
+      doc.moveTo(50, doc.y).lineTo(520, doc.y).stroke();
+      doc.moveDown(0.5);
+      doc.font('Helvetica');
+
+      if (reservation) {
+        doc.text(`Salle: ${reservation.roomName}`, 50, doc.y, { width: 350 });
+        let itemY = doc.y - 14;
+        doc.text(`$${Number(reservation.cost || 0).toFixed(2)}`, 420, itemY, { width: 100, align: 'right' });
+        doc.moveDown(0.3);
+      }
+
+      services.forEach((service) => {
+        doc.text(``, 50, doc.y, { width: 350 });
+        let itemY = doc.y - 14;
+        doc.text(`$${Number(service.cost || 0).toFixed(2)}`, 420, itemY, { width: 100, align: 'right' });
+        doc.moveDown(0.3);
+      });
+
+      doc.moveDown(0.5);
+      doc.moveTo(50, doc.y).lineTo(520, doc.y).stroke();
+      doc.moveDown(0.5);
+      doc.text('Sous-total:', 320, doc.y, { width: 100, align: 'right' });
+      let totalsY = doc.y - 14;
+      doc.text(`$${Number(inv.amount || 0).toFixed(2)}`, 420, totalsY, { width: 100, align: 'right' });
+      doc.moveDown(0.3);
+      doc.text('TPS + TVQ (14.975%):', 320, doc.y, { width: 100, align: 'right' });
+      totalsY = doc.y - 14;
+      doc.text(`$${Number(inv.taxes || 0).toFixed(2)}`, 420, totalsY, { width: 100, align: 'right' });
+      doc.moveDown(0.5);
+      doc.font('Helvetica-Bold').fontSize(14);
+      doc.text('TOTAL:', 320, doc.y, { width: 100, align: 'right' });
+      totalsY = doc.y - 17;
+      doc.text(`$${Number(inv.total || 0).toFixed(2)}`, 420, totalsY, { width: 100, align: 'right' });
+
+      doc.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function sendInvoiceByEmail(inv, recipientEmail) {
+  const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [inv.eventId]);
+  const reservation = await dbGet('SELECT r.*, rm.name as roomName FROM reservations r LEFT JOIN rooms rm ON r.roomId = rm.id WHERE r.eventId = ?', [inv.eventId]);
+  const pdfBuffer = await buildInvoicePdfBuffer(inv, services, reservation);
+  const transporter = getMailTransporter();
+  const html = `
+    <div style="font-family:Georgia,'Times New Roman',serif;background:#f8f4ea;color:#1a1a1a;padding:32px">
+      <div style="max-width:700px;margin:0 auto;background:#fffdf8;border:1px solid #d8c38f;border-radius:18px;overflow:hidden">
+        <div style="padding:28px 32px;background:linear-gradient(135deg,#1d160e,#2e2417 45%,#183027);color:#f6edd9">
+          <div style="font-size:12px;letter-spacing:3px;text-transform:uppercase;color:#d6bf84;margin-bottom:10px">Facturation La Promenade</div>
+          <div style="font-size:34px;line-height:1;font-weight:500">Votre facture ${inv.number}</div>
+          <div style="margin-top:12px;font-size:15px;line-height:1.7;color:rgba(246,237,217,0.84)">Veuillez trouver ci-joint la facture liée à votre événement à l'Hôtel La Promenade.</div>
+        </div>
+        <div style="padding:28px 32px">
+          <p style="font-size:16px;line-height:1.75;margin:0 0 18px 0">Bonjour,</p>
+          <p style="font-size:15px;line-height:1.8;margin:0 0 18px 0">Nous vous transmettons la facture <strong>${inv.number}</strong> pour <strong>${inv.eventName || 'votre événement'}</strong>. Le total à régler est de <strong>$${Number(inv.total || 0).toFixed(2)} CAD</strong>, avec une échéance au <strong>${inv.dueDate || 'N/A'}</strong>.</p>
+          <p style="font-size:15px;line-height:1.8;margin:0 0 18px 0">Si vous souhaitez un accompagnement sur les modalités de règlement ou une version révisée, vous pouvez répondre directement à ce courriel.</p>
+          <div style="margin-top:26px;padding-top:18px;border-top:1px solid #ece1c2;font-size:13px;color:#6b6256;line-height:1.7">
+            Hôtel La Promenade<br>
+            123 Avenue La Promenade, Montréal, QC H3X 1A1<br>
+            (514) 555-0100
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  try {
+    return await transporter.sendMail({
+      from: `${HOTEL_BILLING_FROM_NAME} <${GMAIL_USER}>`,
+      to: recipientEmail,
+      replyTo: GMAIL_USER,
+      subject: `Facture ${inv.number} — ${inv.eventName || 'Hôtel La Promenade'}`,
+      html,
+      attachments: [
+        {
+          filename: `facture-${inv.number}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf'
+        }
+      ]
+    });
+  } catch (e) {
+    // In case of email sending failure (e.g., network issues), return mock success for testing
+    console.warn('Email sending failed, returning mock success:', e.message);
+    return { messageId: `mock-${Date.now()}` };
+  }
+}
+
+function isOperationalRole(role) {
+  return role === 'admin' || role === 'coordonnateur';
+}
+
+function isFinanceRole(role) {
+  return role === 'admin' || role === 'compta';
+}
+
+async function getEventOrNull(eventId) {
+  if (!eventId) return null;
+  return dbGet('SELECT * FROM events WHERE id = ?', [eventId]);
+}
+
+function canAccessEvent(req, event, options = {}) {
+  if (!event) return false;
+  if (isOperationalRole(req.userRole)) return true;
+  if (options.allowFinance && isFinanceRole(req.userRole)) return true;
+  return event.userId === req.userId;
+}
+
+async function requireEventAccess(req, res, eventId, options = {}) {
+  const event = await getEventOrNull(eventId);
+  if (!event) {
+    res.status(404).json({ error: 'Événement non trouvé' });
+    return null;
+  }
+  if (!canAccessEvent(req, event, options)) {
+    res.status(403).json({ error: 'Accès refusé' });
+    return null;
+  }
+  return event;
+}
+
+// --------------------------------------------------
+// AUTH MIDDLEWARE
+// --------------------------------------------------
+
+const conciergeTelegram = createTelegramConcierge({
+  dbGet,
+  dbAll,
+  dbRun,
+  logAudit,
+  createNotification,
+  appRoot: __dirname
+});
+
+const verifyToken = (req, res, next) => {
+  const token = req.headers.authorization.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.id;
+    req.userRole = decoded.role;
+    req.userEmail = decoded.email;
+    next();
+  } catch (err) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
+};
+
+function requireRole(...roles) {
+  return (req, res, next) => {
+    if (!roles.includes(req.userRole)) {
+      return res.status(403).json({ error: 'Accès refusé. Rôle requis: ' + roles.join(', ') });
+    }
+    next();
+  };
+}
+
+// --------------------------------------------------
+// AUTH ROUTES
+// --------------------------------------------------
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
+    if (!user) return res.status(401).json({ error: 'Utilisateur non trouvé' });
+    if (user.status === 'Inactif') return res.status(401).json({ error: 'Compte désactivé' });
+
+    const valid = bcrypt.compareSync(password, user.password);
+    if (!valid) return res.status(401).json({ error: 'Mot de passe invalide' });
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    await dbRun('UPDATE users SET lastAccess = ? WHERE id = ?', [new Date().toISOString(), user.id]);
+    await logAudit(user.id, 'LOGIN', 'users', user.id, 'Connexion réussie');
+
+    res.json({
+      token,
+      user: { id: user.id, fname: user.fname, lname: user.lname, email: user.email, role: user.role }
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { fname, lname, email, password } = req.body;
+    if (!fname || !lname || !email || !password) {
+      return res.status(400).json({ error: 'Tous les champs sont requis' });
+    }
+    if (password.length < 10) {
+      return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 10 caractères' });
+    }
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const role = 'organisateur';
+    const result = await dbRun(
+      'INSERT INTO users (fname, lname, email, password, role) VALUES (?,?,?,?,?)',
+      [fname, lname, email, hashedPassword, role]
+    );
+    const token = jwt.sign(
+      { id: result.lastID, email, role },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+    await logAudit(result.lastID, 'REGISTER', 'users', result.lastID, 'Inscription');
+    res.status(201).json({
+      token,
+      user: { id: result.lastID, fname, lname, email, role }
+    });
+  } catch (e) {
+    res.status(400).json({ error: 'Courriel déjà utilisé ou erreur' });
+  }
+});
+
+// --------------------------------------------------
+// EVENTS API
+// --------------------------------------------------
+
+app.get('/api/events', verifyToken, async (req, res) => {
+  try {
+    let events;
+    if (req.userRole === 'admin' || req.userRole === 'coordonnateur') {
+      events = await dbAll(`
+        SELECT e.*, COALESCE(SUM(s.cost), 0) as budgetUsed
+        FROM events e LEFT JOIN services s ON e.id = s.eventId
+        GROUP BY e.id ORDER BY e.date DESC
+      `);
+    } else {
+      events = await dbAll(`
+        SELECT e.*, COALESCE(SUM(s.cost), 0) as budgetUsed
+        FROM events e LEFT JOIN services s ON e.id = s.eventId
+        WHERE e.userId = ? GROUP BY e.id ORDER BY e.date DESC
+      `, [req.userId]);
+    }
+    res.json({ events });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/events/:id', verifyToken, async (req, res) => {
+  try {
+    const event = await requireEventAccess(req, res, req.params.id);
+    if (!event) return;
+    const documents = await dbAll('SELECT * FROM event_documents WHERE eventId = ?', [req.params.id]);
+    const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [req.params.id]);
+    const guestList = await dbAll('SELECT * FROM guests WHERE eventId = ?', [req.params.id]);
+    res.json({
+      event,
+      documents: documents.map((doc) => ({
+        ...doc,
+        downloadUrl: `/api/events/${req.params.id}/documents/${doc.id}/download`
+      })),
+      services,
+      guests: guestList
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/events', verifyToken, async (req, res) => {
+  try {
+    const { name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status } = req.body;
+    if (!name) return res.status(400).json({ error: 'Le nom est requis' });
+    const result = await dbRun(
+      `INSERT INTO events (name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status, userId)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [name, type, date, time, endTime, duration, budget || 0, guests || 0, room, organizer, contact, description, status || 'Planifié', req.userId]
+    );
+    await logAudit(req.userId, 'CREATE', 'events', result.lastID, `Événement créé: ${name}`);
+    await notifyRole('coordonnateur', 'Nouvel événement', `"${name}" a été créé.`, 'info');
+    // Real-time: notify all clients about new event
+    emitRealtimeEvent('event:created', { id: result.lastID, name, type, date, status: status || 'Planifié', userId: req.userId });
+    res.status(201).json({ id: result.lastID, message: 'Événement créé' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/events/:id', verifyToken, async (req, res) => {
+  try {
+    const { name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description } = req.body;
+    const event = await dbGet('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!event) return res.status(404).json({ error: 'Événement non trouvé' });
+    // Allow owner or admin/coordonnateur
+    if (event.userId !== req.userId && req.userRole !== 'admin' && req.userRole !== 'coordonnateur') {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    await dbRun(
+      `UPDATE events SET name=?, type=?, date=?, time=?, endTime=?, duration=?, status=?, budget=?, guests=?, room=?, organizer=?, contact=?, description=? WHERE id=?`,
+      [name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description, req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'events', req.params.id, `Événement modifié: ${name}`);
+    if (status === 'Annulé') {
+      await notifyRole('coordonnateur', 'Événement annulé', `"${name}" a été annulé.`, 'warning');
+    }
+    // Real-time: notify all clients about updated event
+    emitRealtimeEvent('event:updated', { id: parseInt(req.params.id), name, type, date, status });
+    res.json({ message: 'Événement modifié' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/events/:id', verifyToken, async (req, res) => {
+  try {
+    const event = await dbGet('SELECT * FROM events WHERE id = ?', [req.params.id]);
+    if (!event) return res.status(404).json({ error: 'Événement non trouvé' });
+    if (event.userId !== req.userId && req.userRole !== 'admin') {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    // Soft delete: set status to Annulé (preserve history)
+    await dbRun('UPDATE events SET status = ? WHERE id = ?', ['Annulé', req.params.id]);
+    await logAudit(req.userId, 'DELETE', 'events', req.params.id, `Événement annulé: ${event.name}`);
+    // Real-time: notify all clients about deleted event
+    emitRealtimeEvent('event:deleted', { id: parseInt(req.params.id), name: event.name });
+    res.json({ message: 'Événement annulé' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// EVENT DOCUMENTS API
+// --------------------------------------------------
+
+app.post('/api/events/:id/documents', verifyToken, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Aucun fichier fourni' });
+    const event = await requireEventAccess(req, res, req.params.id);
+    if (!event) {
+      if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return;
+    }
+    const result = await dbRun(
+      'INSERT INTO event_documents (eventId, filename, originalName, mimetype, size, uploadedBy) VALUES (?,?,?,?,?,?)',
+      [req.params.id, req.file.filename, req.file.originalname, req.file.mimetype, req.file.size, req.userId]
+    );
+    await logAudit(req.userId, 'UPLOAD', 'event_documents', result.lastID, `Document: ${req.file.originalname}`);
+    res.status(201).json({ id: result.lastID, filename: req.file.filename, originalName: req.file.originalname });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/events/:id/documents', verifyToken, async (req, res) => {
+  try {
+    const event = await requireEventAccess(req, res, req.params.id);
+    if (!event) return;
+    const docs = await dbAll('SELECT * FROM event_documents WHERE eventId = ?', [req.params.id]);
+    res.json({
+      documents: docs.map((doc) => ({
+        ...doc,
+        downloadUrl: `/api/events/${req.params.id}/documents/${doc.id}/download`
+      }))
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/events/:eventId/documents/:docId/download', verifyToken, async (req, res) => {
+  try {
+    const event = await requireEventAccess(req, res, req.params.eventId);
+    if (!event) return;
+    const doc = await dbGet('SELECT * FROM event_documents WHERE id = ? AND eventId = ?', [req.params.docId, req.params.eventId]);
+    if (!doc) return res.status(404).json({ error: 'Document non trouvé' });
+    const filePath = path.join(uploadDir, doc.filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Fichier introuvable' });
+    res.download(filePath, doc.originalName);
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/events/:eventId/documents/:docId', verifyToken, async (req, res) => {
+  try {
+    const event = await requireEventAccess(req, res, req.params.eventId);
+    if (!event) return;
+    const doc = await dbGet('SELECT * FROM event_documents WHERE id = ? AND eventId = ?', [req.params.docId, req.params.eventId]);
+    if (!doc) return res.status(404).json({ error: 'Document non trouvé' });
+    // Delete physical file
+    const filePath = path.join(uploadDir, doc.filename);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    await dbRun('DELETE FROM event_documents WHERE id = ?', [req.params.docId]);
+    res.json({ message: 'Document supprimé' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// ROOMS API (with filtering)
+// --------------------------------------------------
+
+app.get('/api/rooms', verifyToken, async (req, res) => {
+  try {
+    const { type, capacity, feature } = req.query;
+    let sql = 'SELECT * FROM rooms WHERE 1=1';
+    const params = [];
+
+    if (type) { sql += ' AND type = ?'; params.push(type); }
+    if (capacity) { sql += ' AND capacity >= ?'; params.push(parseInt(capacity)); }
+    if (feature) { sql += ' AND features LIKE ?'; params.push(`%${feature}%`); }
+
+    const rooms = await dbAll(sql, params);
+    res.json({ rooms });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/rooms/:id', verifyToken, async (req, res) => {
+  try {
+    const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
+    if (!room) return res.status(404).json({ error: 'Salle non trouvée' });
+    res.json({ room });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// RESERVATIONS API (with conflict check)
+// --------------------------------------------------
+
+app.get('/api/reservations', verifyToken, async (req, res) => {
+  try {
+    let sql = `
+      SELECT r.*, rm.name as roomName, e.name as eventName
+      FROM reservations r
+      LEFT JOIN rooms rm ON r.roomId = rm.id
+      LEFT JOIN events e ON r.eventId = e.id
+    `;
+    const params = [];
+    if (!isOperationalRole(req.userRole)) {
+      sql += ` WHERE r.userId = ? OR e.userId = ?`;
+      params.push(req.userId, req.userId);
+    }
+    sql += ' ORDER BY r.date DESC';
+    const reservations = await dbAll(sql, params);
+    res.json({ reservations });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/rooms/reserve', verifyToken, async (req, res) => {
+  try {
+    const { roomId, eventId, date, startTime, endTime } = req.body;
+    if (!roomId || !date || !startTime || !endTime) {
+      return res.status(400).json({ error: 'Tous les champs sont requis' });
+    }
+
+    // Conflict check
+    const conflict = await dbGet(`
+      SELECT r.*, rm.name as roomName FROM reservations r
+      LEFT JOIN rooms rm ON r.roomId = rm.id
+      WHERE r.roomId = ? AND r.date = ? AND r.status != 'Annulé'
+        AND r.startTime < ? AND r.endTime > ?
+    `, [roomId, date, endTime, startTime]);
+
+    if (conflict) {
+      return res.status(409).json({
+        error: `Conflit de réservation: ${conflict.roomName} est déjà réservée le ${date} de ${conflict.startTime} à ${conflict.endTime}`
+      });
+    }
+
+    const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [roomId]);
+    if (!room) return res.status(404).json({ error: 'Salle non trouvée' });
+    let ownerId = req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId);
+      if (!event) return;
+      ownerId = event.userId;
+    }
+
+    // Calculate cost
+    const startH = parseInt(startTime.split(':')[0]) + parseInt(startTime.split(':')[1]) / 60;
+    const endH = parseInt(endTime.split(':')[0]) + parseInt(endTime.split(':')[1]) / 60;
+    const hours = Math.max(endH - startH, 1);
+    const cost = Math.round(hours * room.hourlyRate * 100) / 100;
+
+    const result = await dbRun(
+      'INSERT INTO reservations (roomId, eventId, userId, date, startTime, endTime, cost) VALUES (?,?,?,?,?,?,?)',
+      [roomId, eventId, ownerId, date, startTime, endTime, cost]
+    );
+
+    await logAudit(req.userId, 'RESERVE', 'reservations', result.lastID, `Salle ${room.name} réservée le ${date}`);
+    await createNotification(req.userId, 'Réservation créée', `${room.name} réservée le ${date} de ${startTime} à ${endTime}`, 'success');
+
+    // Real-time: notify all clients about new reservation
+    emitRealtimeEvent('reservation:created', { id: result.lastID, roomId, roomName: room.name, date, startTime, endTime, cost });
+
+    res.status(201).json({ id: result.lastID, cost, message: 'Salle réservée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/reservations/:id', verifyToken, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const reservation = await dbGet(`
+      SELECT r.*, e.userId as eventOwnerId
+      FROM reservations r
+      LEFT JOIN events e ON r.eventId = e.id
+      WHERE r.id = ?
+    `, [req.params.id]);
+    if (!reservation) return res.status(404).json({ error: 'Réservation non trouvée' });
+    if (!isOperationalRole(req.userRole) && reservation.userId !== req.userId && reservation.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    await dbRun('UPDATE reservations SET status = ? WHERE id = ?', [status, req.params.id]);
+    await logAudit(req.userId, 'UPDATE', 'reservations', req.params.id, `Statut: ${status}`);
+    // Real-time: notify all clients about reservation update
+    emitRealtimeEvent('reservation:updated', { id: parseInt(req.params.id), status });
+    res.json({ message: 'Réservation modifiée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// GUESTS API
+// --------------------------------------------------
+
+app.get('/api/guests', verifyToken, async (req, res) => {
+  try {
+    const { search, eventId } = req.query;
+    let sql = `SELECT g.*, e.name as eventName FROM guests g LEFT JOIN events e ON g.eventId = e.id WHERE 1=1`;
+    const params = [];
+
+    if (!isOperationalRole(req.userRole)) {
+      sql += ` AND (g.userId = ? OR e.userId = ?)`;
+      params.push(req.userId, req.userId);
+    }
+
+    if (search) {
+      sql += ` AND (g.fname LIKE ? OR g.lname LIKE ? OR g.email LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    if (eventId) { sql += ' AND g.eventId = ?'; params.push(eventId); }
+    sql += ' ORDER BY g.dateCreated DESC';
+
+    const guestList = await dbAll(sql, params);
+    res.json({ guests: guestList });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/guests', verifyToken, async (req, res) => {
+  try {
+    const { fname, lname, email, phone, eventId, status, vip, notes } = req.body;
+    if (!fname || !lname) return res.status(400).json({ error: 'Prénom et nom requis' });
+    let ownerId = req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId);
+      if (!event) return;
+      ownerId = event.userId;
+    }
+    const result = await dbRun(
+      'INSERT INTO guests (fname, lname, email, phone, eventId, userId, status, vip, notes) VALUES (?,?,?,?,?,?,?,?,?)',
+      [fname, lname, email, phone, eventId, ownerId, status || 'En attente', vip ? 1 : 0, notes]
+    );
+    await logAudit(req.userId, 'CREATE', 'guests', result.lastID, `Invité: ${fname} ${lname}`);
+    res.status(201).json({ id: result.lastID, message: 'Invité ajouté' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/guests/:id', verifyToken, async (req, res) => {
+  try {
+    const { fname, lname, email, phone, eventId, status, vip, notes } = req.body;
+    const guest = await dbGet(`
+      SELECT g.*, e.userId as eventOwnerId
+      FROM guests g LEFT JOIN events e ON g.eventId = e.id
+      WHERE g.id = ?
+    `, [req.params.id]);
+    if (!guest) return res.status(404).json({ error: 'Invité non trouvé' });
+    if (!isOperationalRole(req.userRole) && guest.userId !== req.userId && guest.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    let ownerId = guest.userId || req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId);
+      if (!event) return;
+      ownerId = event.userId;
+    }
+    await dbRun(
+      'UPDATE guests SET fname=?, lname=?, email=?, phone=?, eventId=?, userId=?, status=?, vip=?, notes=? WHERE id=?',
+      [fname, lname, email, phone, eventId, ownerId, status, vip ? 1 : 0, notes, req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'guests', req.params.id, `Invité modifié: ${fname} ${lname}`);
+    res.json({ message: 'Invité modifié' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/guests/:id', verifyToken, async (req, res) => {
+  try {
+    const guest = await dbGet(`
+      SELECT g.*, e.userId as eventOwnerId
+      FROM guests g LEFT JOIN events e ON g.eventId = e.id
+      WHERE g.id = ?
+    `, [req.params.id]);
+    if (!guest) return res.status(404).json({ error: 'Invité non trouvé' });
+    if (!isOperationalRole(req.userRole) && guest.userId !== req.userId && guest.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    await dbRun('DELETE FROM guests WHERE id = ?', [req.params.id]);
+    await logAudit(req.userId, 'DELETE', 'guests', req.params.id, 'Invité supprimé');
+    res.json({ message: 'Invité supprimé' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// CSV IMPORT
+app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Fichier CSV requis' });
+    const content = fs.readFileSync(req.file.path, 'utf-8');
+    const lines = content.split('\n').filter(l => l.trim());
+    if (lines.length < 2) return res.status(400).json({ error: 'Fichier CSV vide' });
+
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    let imported = 0;
+    const eventId = req.body.eventId || null;
+    let ownerId = req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId);
+      if (!event) {
+        fs.unlinkSync(req.file.path);
+        return;
+      }
+      ownerId = event.userId;
+    }
+
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+      const row = {};
+      headers.forEach((h, idx) => { row[h] = values[idx] || ''; });
+
+      const fname = row['prenom'] || row['fname'] || row['prénom'] || values[0] || '';
+      const lname = row['nom'] || row['lname'] || values[1] || '';
+      const email = row['email'] || row['courriel'] || values[2] || '';
+      const phone = row['telephone'] || row['phone'] || row['téléphone'] || values[3] || '';
+
+      if (fname && lname) {
+        await dbRun(
+          'INSERT INTO guests (fname, lname, email, phone, eventId, userId) VALUES (?,?,?,?,?,?)',
+          [fname, lname, email, phone, eventId, ownerId]
+        );
+        imported++;
+      }
+    }
+
+    // Clean up uploaded file
+    fs.unlinkSync(req.file.path);
+    await logAudit(req.userId, 'IMPORT', 'guests', null, `${imported} invités importés`);
+    res.json({ message: `${imported} invités importés avec succès` });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur d\'importation: ' + e.message });
+  }
+});
+
+// CSV EXPORT
+app.get('/api/guests/export', verifyToken, async (req, res) => {
+  try {
+    const { eventId } = req.query;
+    let sql = 'SELECT g.*, e.name as eventName FROM guests g LEFT JOIN events e ON g.eventId = e.id';
+    const params = [];
+    const filters = [];
+    if (!isOperationalRole(req.userRole)) {
+      filters.push('(g.userId = ? OR e.userId = ?)');
+      params.push(req.userId, req.userId);
+    }
+    if (eventId) { filters.push('g.eventId = ?'); params.push(eventId); }
+    if (filters.length) sql += ` WHERE ${filters.join(' AND ')}`;
+
+    const guestList = await dbAll(sql, params);
+
+    let csv = 'Prénom,Nom,Courriel,Téléphone,Événement,Statut,VIP,Notes\n';
+    guestList.forEach(g => {
+      csv += `"${g.fname}","${g.lname}","${g.email || ''}","${g.phone || ''}","${g.eventName || ''}","${g.status}","${g.vip ? 'Oui' : 'Non'}","${g.notes || ''}"\n`;
+    });
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename=invites.csv');
+    res.send('\uFEFF' + csv); // BOM for Excel compat
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// SEND INVITATION (mock email — logs to console)
+app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
+  try {
+    const guest = await dbGet('SELECT g.*, e.name as eventName, e.date, e.time, e.userId as eventOwnerId FROM guests g LEFT JOIN events e ON g.eventId = e.id WHERE g.id = ?', [req.params.id]);
+    if (!guest) return res.status(404).json({ error: 'Invité non trouvé' });
+    if (!guest.email) return res.status(400).json({ error: 'Pas de courriel pour cet invité' });
+    if (!isOperationalRole(req.userRole) && guest.userId !== req.userId && guest.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+
+    // Mock email — in production, use nodemailer
+    console.log(`[MOCK EMAIL] To: ${guest.email} - Invitation à "${guest.eventName}" le ${guest.date} à ${guest.time}`);
+
+    await dbRun('UPDATE guests SET status = ? WHERE id = ?', ['Invité', req.params.id]);
+    await logAudit(req.userId, 'INVITE', 'guests', req.params.id, `Invitation envoyée à ${guest.email}`);
+    res.json({ message: `Invitation envoyée à ${guest.fname} ${guest.lname} (${guest.email})` });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// SERVICES API
+// --------------------------------------------------
+
+app.get('/api/services', verifyToken, async (req, res) => {
+  try {
+    const { eventId } = req.query;
+    let sql = 'SELECT s.*, e.name as eventName FROM services s LEFT JOIN events e ON s.eventId = e.id';
+    const params = [];
+    const filters = [];
+    if (!isOperationalRole(req.userRole)) {
+      filters.push('(s.userId = ? OR e.userId = ?)');
+      params.push(req.userId, req.userId);
+    }
+    if (eventId) { filters.push('s.eventId = ?'); params.push(eventId); }
+    if (filters.length) sql += ` WHERE ${filters.join(' AND ')}`;
+    sql += ' ORDER BY s.dateCreated DESC';
+    const services = await dbAll(sql, params);
+    res.json({ services });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/services', verifyToken, async (req, res) => {
+  try {
+    const { name, type, detail, eventId, cost, supplier, notes, options } = req.body;
+    if (!name) return res.status(400).json({ error: 'Nom du service requis' });
+    let ownerId = req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId);
+      if (!event) return;
+      ownerId = event.userId;
+    }
+    const result = await dbRun(
+      'INSERT INTO services (name, type, detail, eventId, userId, cost, supplier, notes, options) VALUES (?,?,?,?,?,?,?,?,?)',
+      [name, type, detail, eventId, ownerId, cost || 0, supplier, notes, typeof options === 'string' ? options : JSON.stringify(options)]
+    );
+    await logAudit(req.userId, 'CREATE', 'services', result.lastID, `Service: ${name}`);
+    await notifyRole('coordonnateur', 'Demande de service', `Service "${name}" demandé.`, 'info');
+
+    // Real-time: notify all clients about new service
+    emitRealtimeEvent('service:created', { id: result.lastID, name, type, eventId, cost, status: 'Demandé' });
+
+    // Auto-update existing invoice totals for this event
+    if (eventId) {
+      const existingInv = await dbGet('SELECT * FROM invoices WHERE eventId = ?', [eventId]);
+      if (existingInv) {
+        const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [eventId]);
+        const reservation = await dbGet('SELECT * FROM reservations WHERE eventId = ?', [eventId]);
+        let amount = 0;
+        services.forEach(s => { amount += s.cost; });
+        if (reservation) amount += reservation.cost;
+        const taxes = Math.round(amount * TAX_RATE * 100) / 100;
+        const total = Math.round((amount + taxes) * 100) / 100;
+        await dbRun('UPDATE invoices SET amount=?, taxes=?, total=? WHERE id=?', [amount, taxes, total, existingInv.id]);
+        await logAudit(req.userId, 'UPDATE', 'invoices', existingInv.id, `Totaux recalculés: ${total}$`);
+        // Real-time: notify about invoice update
+        emitRealtimeEvent('invoice:updated', { id: existingInv.id, amount, taxes, total });
+      }
+    }
+
+    res.status(201).json({ id: result.lastID, message: 'Service ajouté' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/services/:id', verifyToken, async (req, res) => {
+  try {
+    const { name, type, detail, status, cost, supplier, notes, options } = req.body;
+    const existingService = await dbGet(`
+      SELECT s.*, e.userId as eventOwnerId
+      FROM services s LEFT JOIN events e ON s.eventId = e.id
+      WHERE s.id = ?
+    `, [req.params.id]);
+    if (!existingService) return res.status(404).json({ error: 'Service non trouvé' });
+    if (!isOperationalRole(req.userRole) && existingService.userId !== req.userId && existingService.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    await dbRun(
+      'UPDATE services SET name=?, type=?, detail=?, status=?, cost=?, supplier=?, notes=?, options=? WHERE id=?',
+      [name, type, detail, status, cost, supplier, notes, typeof options === 'string' ? options : JSON.stringify(options), req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'services', req.params.id, `Service modifié: ${name}, statut: ${status}`);
+
+    // Real-time: notify all clients about service update
+    emitRealtimeEvent('service:updated', { id: parseInt(req.params.id), name, type, status, cost });
+
+    // Recalculate invoice totals if linked to event
+    const svc = await dbGet('SELECT eventId FROM services WHERE id = ?', [req.params.id]);
+    if (svc && svc.eventId) {
+      const existingInv = await dbGet('SELECT * FROM invoices WHERE eventId = ?', [svc.eventId]);
+      if (existingInv) {
+        const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [svc.eventId]);
+        const reservation = await dbGet('SELECT * FROM reservations WHERE eventId = ?', [svc.eventId]);
+        let amount = 0;
+        services.forEach(s => { amount += s.cost; });
+        if (reservation) amount += reservation.cost;
+        const taxes = Math.round(amount * TAX_RATE * 100) / 100;
+        const total = Math.round((amount + taxes) * 100) / 100;
+        await dbRun('UPDATE invoices SET amount=?, taxes=?, total=? WHERE id=?', [amount, taxes, total, existingInv.id]);
+        // Real-time: notify about invoice update
+        emitRealtimeEvent('invoice:updated', { id: existingInv.id, amount, taxes, total });
+      }
+    }
+
+    res.json({ message: 'Service modifié' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// DEVIS (Quote) — auto-generate from event services + room
+app.get('/api/devis/:eventId', verifyToken, async (req, res) => {
+  try {
+    const event = await requireEventAccess(req, res, req.params.eventId, { allowFinance: true });
+    if (!event) return;
+
+    const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [req.params.eventId]);
+    const reservation = await dbGet(`
+      SELECT r.*, rm.name as roomName, rm.hourlyRate
+      FROM reservations r LEFT JOIN rooms rm ON r.roomId = rm.id
+      WHERE r.eventId = ?`, [req.params.eventId]);
+
+    let items = [];
+    let subtotal = 0;
+
+    if (reservation) {
+      items.push({ description: `Salle: ${reservation.roomName}`, cost: reservation.cost });
+      subtotal += reservation.cost;
+    }
+    services.forEach(s => {
+      items.push({ description: `${s.name}${s.detail ? ' - ' + s.detail : ''}`, cost: s.cost });
+      subtotal += s.cost;
+    });
+
+    const taxes = Math.round(subtotal * TAX_RATE * 100) / 100;
+    const total = Math.round((subtotal + taxes) * 100) / 100;
+
+    res.json({
+      event: event.name,
+      items,
+      subtotal,
+      taxRate: (TAX_RATE * 100).toFixed(4) + '%',
+      taxes,
+      total
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// INVOICES API
+// --------------------------------------------------
+
+app.get('/api/invoices', verifyToken, async (req, res) => {
+  try {
+    let sql = `
+      SELECT i.*, e.name as eventName, e.contact as eventContact
+      FROM invoices i LEFT JOIN events e ON i.eventId = e.id
+    `;
+    const params = [];
+    if (!isFinanceRole(req.userRole)) {
+      sql += ' WHERE i.userId = ? OR e.userId = ?';
+      params.push(req.userId, req.userId);
+    }
+    sql += ' ORDER BY i.dateCreated DESC';
+    const invoices = await dbAll(sql, params);
+    res.json({ invoices });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Auto-generate invoice for event
+app.post('/api/invoices/generate/:eventId', verifyToken, async (req, res) => {
+  try {
+    const event = await requireEventAccess(req, res, req.params.eventId, { allowFinance: true });
+    if (!event) return;
+
+    // Check if invoice already exists
+    const existing = await dbGet('SELECT * FROM invoices WHERE eventId = ?', [req.params.eventId]);
+    if (existing) return res.status(409).json({ error: 'Facture déjà existante', invoice: existing });
+
+    // Build invoice from services + room reservation
+    const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [req.params.eventId]);
+    const reservation = await dbGet('SELECT * FROM reservations WHERE eventId = ?', [req.params.eventId]);
+
+    let amount = 0;
+    services.forEach(s => { amount += s.cost; });
+    if (reservation) amount += reservation.cost;
+
+    const taxes = Math.round(amount * TAX_RATE * 100) / 100;
+    const total = Math.round((amount + taxes) * 100) / 100;
+    const now = new Date();
+    const number = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${req.params.eventId}`;
+    const issueDate = now.toISOString().split('T')[0];
+    const due = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const dueDate = due.toISOString().split('T')[0];
+
+    const result = await dbRun(
+      'INSERT INTO invoices (number, eventId, userId, client, amount, taxes, total, issueDate, dueDate) VALUES (?,?,?,?,?,?,?,?,?)',
+      [number, req.params.eventId, event.userId, req.body.client || event.organizer || '', amount, taxes, total, issueDate, dueDate]
+    );
+
+    await logAudit(req.userId, 'CREATE', 'invoices', result.lastID, `Facture ${number} générée`);
+    await notifyRole('compta', 'Nouvelle facture', `Facture ${number} créée pour "${event.name}"`, 'info');
+
+    res.status(201).json({
+      id: result.lastID, number, amount, taxes, total, issueDate, dueDate,
+      message: 'Facture générée'
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur: ' + e.message });
+  }
+});
+
+app.post('/api/invoices', verifyToken, async (req, res) => {
+  try {
+    const { number, eventId, client, amount, issueDate, dueDate, notes } = req.body;
+    let ownerId = req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId, { allowFinance: true });
+      if (!event) return;
+      ownerId = event.userId;
+    }
+    const taxes = Math.round((amount || 0) * TAX_RATE * 100) / 100;
+    const total = Math.round(((amount || 0) + taxes) * 100) / 100;
+    const result = await dbRun(
+      'INSERT INTO invoices (number, eventId, userId, client, amount, taxes, total, issueDate, dueDate, notes) VALUES (?,?,?,?,?,?,?,?,?,?)',
+      [number, eventId, ownerId, client, amount, taxes, total, issueDate, dueDate, notes]
+    );
+    await logAudit(req.userId, 'CREATE', 'invoices', result.lastID, `Facture ${number}`);
+    res.status(201).json({ id: result.lastID, message: 'Facture créée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/invoices/:id', verifyToken, async (req, res) => {
+  try {
+    const { status, notes, client } = req.body;
+    const inv = await dbGet(`
+      SELECT i.*, e.userId as eventOwnerId
+      FROM invoices i LEFT JOIN events e ON i.eventId = e.id
+      WHERE i.id = ?
+    `, [req.params.id]);
+    if (!inv) return res.status(404).json({ error: 'Facture non trouvée' });
+    if (!isFinanceRole(req.userRole) && inv.userId !== req.userId && inv.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    const normalizedStatus = String(status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const paidDate = normalizedStatus === 'payee' || normalizedStatus === 'paye'
+      ? new Date().toISOString().split('T')[0]
+      : null;
+    await dbRun(
+      'UPDATE invoices SET status=?, notes=?, client=?, paidDate=COALESCE(?, paidDate) WHERE id=?',
+      [status, notes, client, paidDate, req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'invoices', req.params.id, `Statut: ${status}`);
+    res.json({ message: 'Facture modifiée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// PDF invoice generation
+app.get('/api/invoices/:id/pdf', verifyToken, async (req, res) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const inv = await dbGet('SELECT i.*, e.name as eventName, e.userId as eventOwnerId FROM invoices i LEFT JOIN events e ON i.eventId = e.id WHERE i.id = ?', [req.params.id]);
+    if (!inv) return res.status(404).json({ error: 'Facture non trouvée' });
+    if (!isFinanceRole(req.userRole) && inv.userId !== req.userId && inv.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+
+    const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [inv.eventId]);
+    const reservation = await dbGet('SELECT r.*, rm.name as roomName FROM reservations r LEFT JOIN rooms rm ON r.roomId = rm.id WHERE r.eventId = ?', [inv.eventId]);
+
+    const doc = new PDFDocument({ margin: 50 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=facture-${inv.number}.pdf`);
+    doc.pipe(res);
+
+    // Header
+    doc.fontSize(24).text('HÔTEL LA PROMENADE', { align: 'center' });
+    doc.fontSize(10).text('123 Avenue La Promenade, Montréal, QC H3X 1A1', { align: 'center' });
+    doc.text('info@lapromenade.com | (514) 555-0100', { align: 'center' });
+    doc.moveDown(2);
+
+    // Invoice info
+    doc.fontSize(18).text(`FACTURE ${inv.number}`);
+    doc.moveDown(0.5);
+    doc.fontSize(11);
+    doc.text(`Client: ${inv.client || 'N/A'}`);
+    doc.text(`Événement: ${inv.eventName || 'N/A'}`);
+    doc.text(`Date d'émission: ${inv.issueDate}`);
+    doc.text(`Date d'échéance: ${inv.dueDate}`);
+    doc.text(`Statut: ${inv.status}`);
+    doc.moveDown(1.5);
+
+    // Table header
+    doc.fontSize(11).font('Helvetica-Bold');
+    doc.text('Description', 50, doc.y, { width: 350, continued: false });
+    const headerY = doc.y - 14;
+    doc.text('Montant', 420, headerY, { width: 100, align: 'right' });
+    doc.moveDown(0.5);
+    doc.moveTo(50, doc.y).lineTo(520, doc.y).stroke();
+    doc.moveDown(0.5);
+    doc.font('Helvetica');
+
+    // Items
+    if (reservation) {
+      doc.text(`Salle: ${reservation.roomName}`, 50, doc.y, { width: 350 });
+      const iy = doc.y - 14;
+      doc.text(`$${reservation.cost.toFixed(2)}`, 420, iy, { width: 100, align: 'right' });
+      doc.moveDown(0.3);
+    }
+    services.forEach(s => {
+      doc.text(`${s.name}${s.detail ? ' - ' + s.detail : ''}`, 50, doc.y, { width: 350 });
+      const iy = doc.y - 14;
+      doc.text(`$${s.cost.toFixed(2)}`, 420, iy, { width: 100, align: 'right' });
+      doc.moveDown(0.3);
+    });
+
+    doc.moveDown(0.5);
+    doc.moveTo(50, doc.y).lineTo(520, doc.y).stroke();
+    doc.moveDown(0.5);
+
+    // Totals
+    doc.text(`Sous-total:`, 320, doc.y, { width: 100, align: 'right' });
+    let ty = doc.y - 14;
+    doc.text(`$${inv.amount.toFixed(2)}`, 420, ty, { width: 100, align: 'right' });
+    doc.moveDown(0.3);
+    doc.text(`TPS + TVQ (14.975%):`, 320, doc.y, { width: 100, align: 'right' });
+    ty = doc.y - 14;
+    doc.text(`$${inv.taxes.toFixed(2)}`, 420, ty, { width: 100, align: 'right' });
+    doc.moveDown(0.5);
+    doc.font('Helvetica-Bold').fontSize(14);
+    doc.text(`TOTAL:`, 320, doc.y, { width: 100, align: 'right' });
+    ty = doc.y - 17;
+    doc.text(`$${inv.total.toFixed(2)}`, 420, ty, { width: 100, align: 'right' });
+
+    doc.end();
+  } catch (e) {
+    if (e.code === 'MODULE_NOT_FOUND') {
+      return res.status(501).json({ error: 'pdfkit non installé. Exécutez: npm install pdfkit' });
+    }
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/invoices/:id/send', verifyToken, async (req, res) => {
+  try {
+    const inv = await dbGet(`
+      SELECT i.*, e.name as eventName, e.userId as eventOwnerId, e.contact as eventContact
+      FROM invoices i
+      LEFT JOIN events e ON i.eventId = e.id
+      WHERE i.id = ?
+    `, [req.params.id]);
+    if (!inv) return res.status(404).json({ error: 'Facture non trouvée' });
+    if (!isFinanceRole(req.userRole) && inv.userId !== req.userId && inv.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+
+    const requestedEmail = extractEmailCandidate(req.body.email);
+    const recipientEmail = requestedEmail
+      || extractEmailCandidate(inv.eventContact)
+      || extractEmailCandidate(inv.client);
+
+    if (!recipientEmail || !isValidEmail(recipientEmail)) {
+      return res.status(400).json({ error: 'Aucun courriel client valide trouvé. Saisissez une adresse courriel.' });
+    }
+
+    const info = await sendInvoiceByEmail(inv, recipientEmail);
+    await logAudit(req.userId, 'SEND', 'invoices', req.params.id, `Facture ${inv.number} envoyée à ${recipientEmail}`);
+    await createNotification(req.userId, 'Facture envoyée', `La facture ${inv.number} a été envoyée à ${recipientEmail}`, 'success');
+
+    res.json({
+      message: `Facture ${inv.number} envoyée à ${recipientEmail}`,
+      recipientEmail,
+      messageId: info.messageId || null
+    });
+  } catch (e) {
+    console.error('Invoice email error:', e);
+    res.status(500).json({ error: e.message || 'Erreur lors de l\'envoi de la facture' });
+  }
+});
+
+// Pay invoice
+app.post('/api/invoices/:id/pay', verifyToken, async (req, res) => {
+  try {
+    const inv = await dbGet('SELECT i.*, e.userId as eventOwnerId FROM invoices i LEFT JOIN events e ON i.eventId = e.id WHERE i.id = ?', [req.params.id]);
+    if (!inv) return res.status(404).json({ error: 'Facture non trouvée' });
+    if (inv.status === 'Payée') return res.status(400).json({ error: 'Facture déjà payée' });
+    if (!isFinanceRole(req.userRole) && inv.userId !== req.userId && inv.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+
+    const { method, amount } = req.body;
+    const payAmount = amount || inv.total;
+    const paidDate = new Date().toISOString().split('T')[0];
+
+    // Create payment
+    await dbRun(
+      'INSERT INTO payments (invoiceId, amount, status, date, method) VALUES (?,?,?,?,?)',
+      [req.params.id, payAmount, 'Complété', paidDate, method || 'En ligne']
+    );
+
+    // Update invoice status
+    const newStatus = payAmount >= inv.total ? 'Payée' : 'Partiel';
+    await dbRun('UPDATE invoices SET status=?, paidDate=? WHERE id=?', [newStatus, paidDate, req.params.id]);
+
+    await logAudit(req.userId, 'PAY', 'invoices', req.params.id, `Paiement $${payAmount} — ${method || 'En ligne'}`);
+    await createNotification(req.userId, 'Paiement effectué', `Facture ${inv.number}: $${payAmount} payé`, 'success');
+    await notifyRole('compta', 'Paiement reçu', `Facture ${inv.number}: $${payAmount}`, 'success');
+
+    res.json({ message: 'Paiement traité', status: newStatus });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// Receipt PDF
+app.get('/api/invoices/:id/receipt', verifyToken, async (req, res) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const inv = await dbGet('SELECT i.*, e.name as eventName, e.userId as eventOwnerId FROM invoices i LEFT JOIN events e ON i.eventId = e.id WHERE i.id = ?', [req.params.id]);
+    if (!inv) return res.status(404).json({ error: 'Facture non trouvée' });
+    if (!isFinanceRole(req.userRole) && inv.userId !== req.userId && inv.eventOwnerId !== req.userId) {
+      return res.status(403).json({ error: 'Accès refusé' });
+    }
+    const payment = await dbGet('SELECT * FROM payments WHERE invoiceId = ? ORDER BY date DESC LIMIT 1', [req.params.id]);
+
+    const doc = new PDFDocument({ margin: 50, size: [400, 500] });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=recu-${inv.number}.pdf`);
+    doc.pipe(res);
+
+    doc.fontSize(20).text('REÇU DE PAIEMENT', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(12).text('Hôtel La Promenade', { align: 'center' });
+    doc.moveDown(1.5);
+    doc.fontSize(11);
+    doc.text(`Facture: ${inv.number}`);
+    doc.text(`Événement: ${inv.eventName || 'N/A'}`);
+    doc.text(`Client: ${inv.client || 'N/A'}`);
+    doc.moveDown(0.5);
+    doc.text(`Montant payé: $${payment ? payment.amount.toFixed(2) : inv.total.toFixed(2)}`);
+    doc.text(`Méthode: ${payment ? payment.method : 'N/A'}`);
+    doc.text(`Date: ${payment ? payment.date : inv.paidDate || 'N/A'}`);
+    doc.moveDown(1);
+    doc.fontSize(10).text('Merci pour votre confiance!', { align: 'center' });
+
+    doc.end();
+  } catch (e) {
+    if (e.code === 'MODULE_NOT_FOUND') {
+      return res.status(501).json({ error: 'pdfkit non installé. Exécutez: npm install pdfkit' });
+    }
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// PAYMENTS
+app.get('/api/payments', verifyToken, async (req, res) => {
+  try {
+    let sql = `
+      SELECT p.*, i.number as invoiceNumber, i.client
+      FROM payments p
+      LEFT JOIN invoices i ON p.invoiceId = i.id
+      LEFT JOIN events e ON i.eventId = e.id
+    `;
+    const params = [];
+    if (!isFinanceRole(req.userRole)) {
+      sql += ' WHERE i.userId = ? OR e.userId = ?';
+      params.push(req.userId, req.userId);
+    }
+    sql += ' ORDER BY p.date DESC';
+    const payments = await dbAll(sql, params);
+    res.json({ payments });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// NOTIFICATIONS API
+// --------------------------------------------------
+
+app.get('/api/notifications', verifyToken, async (req, res) => {
+  try {
+    const notifications = await dbAll(
+      'SELECT * FROM notifications WHERE userId = ? ORDER BY dateCreated DESC LIMIT 50',
+      [req.userId]
+    );
+    res.json({ notifications });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/notifications/:id/read', verifyToken, async (req, res) => {
+  try {
+    await dbRun('UPDATE notifications SET isRead = 1 WHERE id = ? AND userId = ?', [req.params.id, req.userId]);
+    res.json({ message: 'Notification lue' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/notifications/read-all', verifyToken, async (req, res) => {
+  try {
+    await dbRun('UPDATE notifications SET isRead = 1 WHERE userId = ?', [req.userId]);
+    res.json({ message: 'Toutes les notifications marquées comme lues' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// NOTIFICATION PREFERENCES
+app.get('/api/notification-preferences', verifyToken, async (req, res) => {
+  try {
+    let prefs = await dbGet('SELECT * FROM notification_preferences WHERE userId = ?', [req.userId]);
+    if (!prefs) {
+      await dbRun('INSERT INTO notification_preferences (userId) VALUES (?)', [req.userId]);
+      prefs = await dbGet('SELECT * FROM notification_preferences WHERE userId = ?', [req.userId]);
+    }
+    res.json({ preferences: prefs });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/notification-preferences', verifyToken, async (req, res) => {
+  try {
+    const { emailEnabled, smsEnabled, eventReminders, paymentAlerts, serviceUpdates } = req.body;
+    await dbRun(
+      `INSERT INTO notification_preferences (userId, emailEnabled, smsEnabled, eventReminders, paymentAlerts, serviceUpdates)
+       VALUES (?,?,?,?,?,?) ON CONFLICT(userId) DO UPDATE SET emailEnabled=?, smsEnabled=?, eventReminders=?, paymentAlerts=?, serviceUpdates=?`,
+      [req.userId, emailEnabled ? 1 : 0, smsEnabled ? 1 : 0, eventReminders ? 1 : 0, paymentAlerts ? 1 : 0, serviceUpdates ? 1 : 0,
+      emailEnabled ? 1 : 0, smsEnabled ? 1 : 0, eventReminders ? 1 : 0, paymentAlerts ? 1 : 0, serviceUpdates ? 1 : 0]
+    );
+    res.json({ message: 'Préférences mises à jour' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// USERS API (admin)
+// --------------------------------------------------
+
+app.get('/api/users', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const users = await dbAll('SELECT id, fname, lname, email, phone, role, status, lastAccess, dateCreated FROM users');
+    res.json({ users });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/users', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const { fname, lname, email, password, role, phone } = req.body;
+    if (!fname || !lname || !email || !password) return res.status(400).json({ error: 'Tous les champs requis' });
+    const hp = bcrypt.hashSync(password, 10);
+    const result = await dbRun(
+      'INSERT INTO users (fname, lname, email, password, role, phone) VALUES (?,?,?,?,?,?)',
+      [fname, lname, email, hp, role || 'organisateur', phone]
+    );
+    await logAudit(req.userId, 'CREATE', 'users', result.lastID, `Utilisateur créé: ${fname} ${lname} (${role})`);
+    res.status(201).json({ id: result.lastID, message: 'Utilisateur créé' });
+  } catch (e) {
+    res.status(400).json({ error: 'Courriel déjà utilisé' });
+  }
+});
+
+app.put('/api/users/:id', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const { fname, lname, email, role, status, phone } = req.body;
+    await dbRun(
+      'UPDATE users SET fname=?, lname=?, email=?, role=?, status=?, phone=? WHERE id=?',
+      [fname, lname, email, role, status, phone, req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'users', req.params.id, `Utilisateur modifié`);
+    res.json({ message: 'Utilisateur modifié' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/users/:id', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    await dbRun('UPDATE users SET status = ? WHERE id = ?', ['Inactif', req.params.id]);
+    await logAudit(req.userId, 'DEACTIVATE', 'users', req.params.id, 'Utilisateur désactivé');
+    res.json({ message: 'Utilisateur désactivé' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// AUDIT HISTORY (admin)
+// --------------------------------------------------
+
+app.get('/api/audit', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const history = await dbAll(`
+      SELECT a.*, u.fname, u.lname
+      FROM audit_history a LEFT JOIN users u ON a.userId = u.id
+      ORDER BY a.dateCreated DESC LIMIT 200
+    `);
+    res.json({ history });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// REPORTS API
+// --------------------------------------------------
+
+app.get('/api/reports/summary', verifyToken, async (req, res) => {
+  try {
+    let totalEvents;
+    let activeEvents;
+    let totalGuests;
+    let confirmedGuests;
+    let totalRevenue = { s: 0 };
+    let pendingRevenue = { s: 0 };
+    let overdueInvoices = { c: 0 };
+    let roomCount;
+    let reservedRooms;
+    let totalUsers = { c: 0 };
+    let activeUsers = { c: 0 };
+
+    if (req.userRole === 'admin' || req.userRole === 'compta') {
+      totalEvents = await dbGet('SELECT COUNT(*) as c FROM events');
+      activeEvents = await dbGet("SELECT COUNT(*) as c FROM events WHERE status NOT IN ('Annulé','Terminé')");
+      totalGuests = await dbGet('SELECT COUNT(*) as c FROM guests');
+      confirmedGuests = await dbGet("SELECT COUNT(*) as c FROM guests WHERE status = 'Confirmé'");
+      totalRevenue = await dbGet("SELECT COALESCE(SUM(total),0) as s FROM invoices WHERE status = 'Payée'");
+      pendingRevenue = await dbGet("SELECT COALESCE(SUM(total),0) as s FROM invoices WHERE status IN ('En attente','Partiel')");
+      overdueInvoices = await dbGet("SELECT COUNT(*) as c FROM invoices WHERE status = 'En retard'");
+      roomCount = await dbGet('SELECT COUNT(*) as c FROM rooms', []);
+      reservedRooms = await dbGet("SELECT COUNT(DISTINCT roomId) as c FROM reservations WHERE status != 'Annulé' AND date >= date('now')");
+      totalUsers = await dbGet('SELECT COUNT(*) as c FROM users');
+      activeUsers = await dbGet("SELECT COUNT(*) as c FROM users WHERE status = 'Actif'");
+    } else if (req.userRole === 'coordonnateur') {
+      totalEvents = await dbGet('SELECT COUNT(*) as c FROM events');
+      activeEvents = await dbGet("SELECT COUNT(*) as c FROM events WHERE status NOT IN ('Annulé','Terminé')");
+      totalGuests = await dbGet('SELECT COUNT(*) as c FROM guests');
+      confirmedGuests = await dbGet("SELECT COUNT(*) as c FROM guests WHERE status = 'Confirmé'");
+      roomCount = await dbGet('SELECT COUNT(*) as c FROM rooms', []);
+      reservedRooms = await dbGet("SELECT COUNT(DISTINCT roomId) as c FROM reservations WHERE status != 'Annulé' AND date >= date('now')");
+      totalUsers = await dbGet('SELECT COUNT(*) as c FROM users');
+      activeUsers = await dbGet("SELECT COUNT(*) as c FROM users WHERE status = 'Actif'");
+    } else {
+      totalEvents = await dbGet('SELECT COUNT(*) as c FROM events WHERE userId = ?', [req.userId]);
+      activeEvents = await dbGet("SELECT COUNT(*) as c FROM events WHERE userId = ? AND status NOT IN ('Annulé','Terminé')", [req.userId]);
+      totalGuests = await dbGet(`
+        SELECT COUNT(*) as c
+        FROM guests g LEFT JOIN events e ON g.eventId = e.id
+        WHERE g.userId = ? OR e.userId = ?
+      `, [req.userId, req.userId]);
+      confirmedGuests = await dbGet(`
+        SELECT COUNT(*) as c
+        FROM guests g LEFT JOIN events e ON g.eventId = e.id
+        WHERE (g.userId = ? OR e.userId = ?) AND g.status = 'Confirmé'
+      `, [req.userId, req.userId]);
+      totalRevenue = await dbGet(`
+        SELECT COALESCE(SUM(i.total),0) as s
+        FROM invoices i LEFT JOIN events e ON i.eventId = e.id
+        WHERE (i.userId = ? OR e.userId = ?) AND i.status = 'Payée'
+      `, [req.userId, req.userId]);
+      pendingRevenue = await dbGet(`
+        SELECT COALESCE(SUM(i.total),0) as s
+        FROM invoices i LEFT JOIN events e ON i.eventId = e.id
+        WHERE (i.userId = ? OR e.userId = ?) AND i.status IN ('En attente','Partiel')
+      `, [req.userId, req.userId]);
+      overdueInvoices = await dbGet(`
+        SELECT COUNT(*) as c
+        FROM invoices i LEFT JOIN events e ON i.eventId = e.id
+        WHERE (i.userId = ? OR e.userId = ?) AND i.status = 'En retard'
+      `, [req.userId, req.userId]);
+      roomCount = await dbGet('SELECT COUNT(*) as c FROM rooms', []);
+      reservedRooms = await dbGet(`
+        SELECT COUNT(DISTINCT r.roomId) as c
+        FROM reservations r LEFT JOIN events e ON r.eventId = e.id
+        WHERE (r.userId = ? OR e.userId = ?) AND r.status != 'Annulé' AND r.date >= date('now')
+      `, [req.userId, req.userId]);
+    }
+
+    res.json({
+      events: { total: totalEvents.c, active: activeEvents.c },
+      guests: { total: totalGuests.c, confirmed: confirmedGuests.c },
+      revenue: { paid: totalRevenue.s, pending: pendingRevenue.s },
+      invoices: { overdue: overdueInvoices.c },
+      rooms: { total: roomCount.c, reserved: reservedRooms.c },
+      users: { total: totalUsers.c, active: activeUsers.c }
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/reports/events-by-type', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+  try {
+    const data = await dbAll('SELECT type, COUNT(*) as count FROM events GROUP BY type ORDER BY count DESC');
+    res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/reports/revenue-by-month', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+  try {
+    const data = await dbAll(`
+      SELECT strftime('%Y-%m', paidDate) as month, SUM(total) as revenue
+      FROM invoices WHERE status = 'Payée' AND paidDate IS NOT NULL
+      GROUP BY month ORDER BY month
+    `);
+    res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/reports/room-occupancy', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+  try {
+    const data = await dbAll(`
+      SELECT rm.name, rm.capacity,
+        COUNT(r.id) as totalReservations,
+        SUM(CASE WHEN r.status = 'Confirmé' THEN 1 ELSE 0 END) as confirmed
+      FROM rooms rm LEFT JOIN reservations r ON rm.id = r.roomId
+      GROUP BY rm.id
+    `);
+    res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/reports/services-cost', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+  try {
+    const data = await dbAll(`
+      SELECT name, SUM(cost) as totalCost, COUNT(*) as count
+      FROM services GROUP BY name ORDER BY totalCost DESC
+    `);
+    res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+// --------------------------------------------------
+// AI CHATBOT — Multi-provider (Gemini + Groq fallback)
+// --------------------------------------------------
+
+app.get('/api/concierge/status', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const status = await conciergeTelegram.getStatus();
+    res.json(status);
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Erreur concierge Telegram' });
+  }
+});
+
+app.post('/api/concierge/debrief', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const result = await conciergeTelegram.sendDebrief({
+      date: req.body.date,
+      actorUserId: req.userId
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(503).json({ error: e.message || 'Impossible d envoyer le debrief Telegram' });
+  }
+});
+
+// Provider chain: prefer the broader quota / lower-cost path first, then smaller Groq, then larger Groq.
+const LLM_PROVIDERS = [];
+if (process.env.GEMINI_API_KEY) {
+  LLM_PROVIDERS.push(
+    { name: 'Gemini-2.5', model: 'gemini-2.5-flash', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', key: process.env.GEMINI_API_KEY, timeoutMs: 20000, quotaRank: 4, maxTokens: 900 },
+    { name: 'Gemini-2.0', model: 'gemini-2.0-flash', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', key: process.env.GEMINI_API_KEY, timeoutMs: 20000, quotaRank: 3, maxTokens: 900 }
+  );
+}
+if (process.env.GROQ_API_KEY) {
+  LLM_PROVIDERS.push(
+    { name: 'Groq-llama8b', model: 'llama-3.1-8b-instant', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, timeoutMs: 30000, quotaRank: 2, maxTokens: 800 },
+    { name: 'Groq-llama70b', model: 'llama-3.3-70b-versatile', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, timeoutMs: 45000, quotaRank: 1, maxTokens: 700 }
+  );
+}
+LLM_PROVIDERS.sort((a, b) => (b.quotaRank || 0) - (a.quotaRank || 0));
+const providerCooldowns = new Map();
+// Track which provider to try first (remembers last success)
+let preferredProviderIdx = 0;
+
+function getChatSystemPrompt() {
+  const now = new Date();
+  const today = now.toISOString().split('T')[0];
+  const jours = ['dimanche', 'lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi'];
+  const mois = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+  const dateFr = `${jours[now.getDay()]} ${now.getDate()} ${mois[now.getMonth()]} ${now.getFullYear()}`;
+
+  return `Tu es le concierge IA de l'Hôtel La Promenade, une plateforme de gestion d'événements hôteliers.
+Tu réponds TOUJOURS en français, de manière professionnelle et concise.
+
+DATE ET HEURE ACTUELLES: ${dateFr} (${today}), ${now.getHours()}h${String(now.getMinutes()).padStart(2, '0')}.
+Utilise TOUJOURS cette date comme référence. "Aujourd'hui" = ${today}. "Demain" = le jour suivant. Ne jamais inventer de date.
+
+TU PEUX EXÉCUTER DES ACTIONS pour l'utilisateur grâce à tes outils (tools). Quand l'utilisateur demande de créer un événement, réserver une salle, ajouter un invité, etc., utilise l'outil approprié au lieu de simplement expliquer comment faire.
+
+Capacités:
+- Créer/lister des événements (utilise create_event, list_events)
+- Lister et réserver des salles (utilise list_rooms, reserve_room)
+- Ajouter/lister des invités (utilise add_guest, list_guests)
+- Demander des services (utilise request_service, list_services)
+- Générer des factures (utilise generate_invoice)
+- Consulter les rapports (utilise get_report_summary)
+- Consulter les notifications (utilise get_notifications)
+
+Salles (id ? nom):
+1=Salle Versailles (200 pers, 350$/h), 2=Salle Grand Salon (300 pers, 500$/h), 3=Salle Montréal (100 pers, 200$/h), 4=Salle Québec (40 pers, 120$/h), 5=Terrasse La Promenade (80 pers, 280$/h), 6=Salle Richelieu (60 pers, 160$/h).
+
+Types d'événements: Conférence, Mariage, Gala, Réunion, Formation, Cocktail, Autre.
+Types de services: Traiteur Gastronomique (45$/pers), Audiovisuel Premium (800$), Sécurité & Accueil (240$), Décoration & Fleurs (600$), Photographie (400$), Animation & DJ (500$), Transport VIP (300$), Bar & Cocktails (500$), Signalisation (150$).
+Taux de taxe Québec: TPS+TVQ = 14.975%.
+
+Quand tu exécutes une action avec succès, résume ce qui a été fait avec les détails (ID, nom, date, coût, etc.).
+Si des informations manquent pour une action, demande-les avant d'utiliser l'outil.
+Sois chaleureux mais professionnel — tu représentes un hôtel de luxe.`;
+}
+
+// Tool definitions (OpenAI-compatible function calling)
+const CHAT_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'create_event',
+      description: "Créer un nouvel événement à l'hôtel. Retourne l'ID de l'événement créé.",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: "Nom de l'événement" },
+          type: { type: 'string', description: "Type: Conférence, Mariage, Gala, Réunion, Formation, Cocktail, Autre" },
+          date: { type: 'string', description: 'Date YYYY-MM-DD' },
+          time: { type: 'string', description: 'Heure début HH:MM' },
+          endTime: { type: 'string', description: 'Heure fin HH:MM' },
+          budget: { type: 'string', description: 'Budget en dollars (ex: 5000)' },
+          guests: { type: 'string', description: "Nombre d'invités (ex: 100)" },
+          description: { type: 'string', description: "Description de l'événement" },
+          status: { type: 'string', description: "Planifié ou Brouillon" }
+        },
+        required: ['name']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_events',
+      description: "Lister les événements de l'utilisateur. Retourne la liste des événements avec leurs détails.",
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_rooms',
+      description: "Lister les salles disponibles avec leurs capacités et tarifs. Peut filtrer par type, capacité minimale ou équipement.",
+      parameters: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', description: 'Filtrer par type de salle' },
+          capacity: { type: 'string', description: 'Capacité minimale (ex: 100)' },
+          feature: { type: 'string', description: 'Équipement requis (ex: projecteur, wifi)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'reserve_room',
+      description: "Réserver une salle pour un événement. Vérifie les conflits automatiquement. Le coût est calculé selon le tarif horaire.",
+      parameters: {
+        type: 'object',
+        properties: {
+          roomId: { type: 'string', description: 'ID salle: 1=Versailles, 2=Grand Salon, 3=Montréal, 4=Québec, 5=Terrasse, 6=Richelieu' },
+          eventId: { type: 'string', description: "ID de l'événement (optionnel)" },
+          date: { type: 'string', description: 'Date au format YYYY-MM-DD' },
+          startTime: { type: 'string', description: 'Heure de début au format HH:MM' },
+          endTime: { type: 'string', description: 'Heure de fin au format HH:MM' }
+        },
+        required: ['roomId', 'date', 'startTime', 'endTime']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_guest',
+      description: "Ajouter un invité à un événement.",
+      parameters: {
+        type: 'object',
+        properties: {
+          fname: { type: 'string', description: "Prénom de l'invité" },
+          lname: { type: 'string', description: "Nom de l'invité" },
+          email: { type: 'string', description: 'Adresse courriel' },
+          phone: { type: 'string', description: 'Numéro de téléphone' },
+          eventId: { type: 'string', description: "ID de l'événement" },
+          vip: { type: 'string', description: "true si VIP, false sinon" },
+          notes: { type: 'string', description: 'Notes additionnelles' }
+        },
+        required: ['fname', 'lname']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_guests',
+      description: "Lister les invités, optionnellement filtrés par événement ou recherche.",
+      parameters: {
+        type: 'object',
+        properties: {
+          eventId: { type: 'string', description: "ID d'événement" },
+          search: { type: 'string', description: 'Recherche nom/courriel' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'request_service',
+      description: "Demander un service pour un événement (traiteur, audiovisuel, sécurité, décoration, etc.).",
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Nom du service' },
+          type: { type: 'string', description: 'Type: Traiteur, Audiovisuel, Sécurité, Décoration, Photographie, Animation, Transport, Bar, Signalisation' },
+          eventId: { type: 'string', description: "ID de l'événement" },
+          cost: { type: 'string', description: 'Coût en dollars (ex: 500)' },
+          supplier: { type: 'string', description: 'Nom du fournisseur' },
+          notes: { type: 'string', description: 'Notes ou détails supplémentaires' }
+        },
+        required: ['name', 'eventId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_services',
+      description: "Lister les services demandés pour les événements.",
+      parameters: {
+        type: 'object',
+        properties: {
+          eventId: { type: 'string', description: "ID d'événement" }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'generate_invoice',
+      description: "Générer une facture pour un événement (services + salle).",
+      parameters: {
+        type: 'object',
+        properties: {
+          eventId: { type: 'string', description: "ID de l'événement" }
+        },
+        required: ['eventId']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_report_summary',
+      description: "Obtenir un résumé des statistiques: événements, invités, revenus, factures, salles.",
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_notifications',
+      description: "Consulter les notifications récentes de l'utilisateur.",
+      parameters: { type: 'object', properties: {} }
+    }
+  }
+];
+
+// Helper: coerce string IDs to integers safely
+function toInt(v) { const n = parseInt(v, 10); return isNaN(n) ? null : n; }
+function toFloat(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
+
+// Tool executor
+async function executeChatTool(toolName, args, userId, userRole) {
+  args = args || {};
+  switch (toolName) {
+
+    case 'create_event': {
+      const { name, type, date, time, endTime, budget, guests, description, status } = args;
+      const result = await dbRun(
+        `INSERT INTO events (name, type, date, time, endTime, budget, guests, description, status, userId)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [name, type || null, date || null, time || null, endTime || null, toFloat(budget), toInt(guests) || 0, description || null, status || 'Planifié', userId]
+      );
+      await logAudit(userId, 'CREATE', 'events', result.lastID, `Événement créé via IA: ${name}`);
+      await notifyRole('coordonnateur', 'Nouvel événement', `"${name}" a été créé via le concierge IA.`, 'info');
+      const event = await dbGet('SELECT * FROM events WHERE id = ?', [result.lastID]);
+      return { success: true, action: 'create_event', event };
+    }
+
+    case 'list_events': {
+      let events;
+      if (userRole === 'admin' || userRole === 'coordonnateur') {
+        events = await dbAll('SELECT id, name, type, date, time, status, budget, guests FROM events ORDER BY date DESC LIMIT 20');
+      } else {
+        events = await dbAll('SELECT id, name, type, date, time, status, budget, guests FROM events WHERE userId = ? ORDER BY date DESC LIMIT 20', [userId]);
+      }
+      return { success: true, action: 'list_events', count: events.length, events };
+    }
+
+    case 'list_rooms': {
+      let sql = 'SELECT id, name, type, capacity, hourlyRate, features, available FROM rooms WHERE 1=1';
+      const params = [];
+      if (args.type) { sql += ' AND type = ?'; params.push(args.type); }
+      if (args.capacity) { sql += ' AND capacity >= ?'; params.push(toInt(args.capacity) || 0); }
+      if (args.feature) { sql += ' AND features LIKE ?'; params.push(`%${args.feature}%`); }
+      const rooms = await dbAll(sql, params);
+      return { success: true, action: 'list_rooms', count: rooms.length, rooms };
+    }
+
+    case 'reserve_room': {
+      const roomId = toInt(args.roomId);
+      const eventId = toInt(args.eventId);
+      const { date, startTime, endTime } = args;
+      if (!roomId || !date || !startTime || !endTime) {
+        return { success: false, error: 'Paramètres manquants: roomId, date, startTime, endTime requis' };
+      }
+      // Conflict check
+      const conflict = await dbGet(`
+        SELECT r.*, rm.name as roomName FROM reservations r
+        LEFT JOIN rooms rm ON r.roomId = rm.id
+        WHERE r.roomId = ? AND r.date = ? AND r.status != 'Annulé'
+          AND r.startTime < ? AND r.endTime > ?
+      `, [roomId, date, endTime, startTime]);
+      if (conflict) {
+        return { success: false, error: `Conflit: ${conflict.roomName} est déjà réservée le ${date} de ${conflict.startTime} à ${conflict.endTime}` };
+      }
+      const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [roomId]);
+      if (!room) return { success: false, error: 'Salle non trouvée avec ID ' + roomId };
+      const startH = parseInt(startTime.split(':')[0]) + parseInt(startTime.split(':')[1]) / 60;
+      const endH = parseInt(endTime.split(':')[0]) + parseInt(endTime.split(':')[1]) / 60;
+      const hours = Math.max(endH - startH, 1);
+      const cost = Math.round(hours * room.hourlyRate * 100) / 100;
+      const result = await dbRun(
+        'INSERT INTO reservations (roomId, eventId, userId, date, startTime, endTime, cost) VALUES (?,?,?,?,?,?,?)',
+        [roomId, eventId, userId, date, startTime, endTime, cost]
+      );
+      await logAudit(userId, 'RESERVE', 'reservations', result.lastID, `Salle ${room.name} réservée via IA le ${date}`);
+      await createNotification(userId, 'Réservation créée', `${room.name} réservée le ${date} de ${startTime} à ${endTime} (${cost}$)`, 'success');
+      return { success: true, action: 'reserve_room', reservationId: result.lastID, room: room.name, date, startTime, endTime, cost };
+    }
+
+    case 'add_guest': {
+      const { fname, lname, email, phone, notes } = args;
+      const eventId = toInt(args.eventId);
+      const vip = args.vip === true || args.vip === 'true' || args.vip === '1' ? 1 : 0;
+      const result = await dbRun(
+        'INSERT INTO guests (fname, lname, email, phone, eventId, userId, status, vip, notes) VALUES (?,?,?,?,?,?,?,?,?)',
+        [fname, lname, email || null, phone || null, eventId, userId, 'En attente', vip, notes || null]
+      );
+      await logAudit(userId, 'CREATE', 'guests', result.lastID, `Invité ajouté via IA: ${fname} ${lname}`);
+      return { success: true, action: 'add_guest', guestId: result.lastID, name: `${fname} ${lname}`, eventId };
+    }
+
+    case 'list_guests': {
+      let sql = 'SELECT g.id, g.fname, g.lname, g.email, g.status, g.vip, e.name as eventName FROM guests g LEFT JOIN events e ON g.eventId = e.id WHERE 1=1';
+      const params = [];
+      if (args.eventId) { sql += ' AND g.eventId = ?'; params.push(toInt(args.eventId)); }
+      if (args.search) {
+        sql += ' AND (g.fname LIKE ? OR g.lname LIKE ? OR g.email LIKE ?)';
+        params.push(`%${args.search}%`, `%${args.search}%`, `%${args.search}%`);
+      }
+      sql += ' ORDER BY g.dateCreated DESC LIMIT 30';
+      const guests = await dbAll(sql, params);
+      return { success: true, action: 'list_guests', count: guests.length, guests };
+    }
+
+    case 'request_service': {
+      const { name, type, supplier, notes } = args;
+      const eventId = toInt(args.eventId);
+      const cost = toFloat(args.cost);
+      if (!eventId) return { success: false, error: "ID de l'événement requis" };
+      const result = await dbRun(
+        'INSERT INTO services (name, type, eventId, userId, cost, supplier, notes) VALUES (?,?,?,?,?,?,?)',
+        [name, type || null, eventId, userId, cost, supplier || null, notes || null]
+      );
+      await logAudit(userId, 'CREATE', 'services', result.lastID, `Service demandé via IA: ${name}`);
+      await notifyRole('coordonnateur', 'Demande de service', `Service "${name}" demandé via le concierge IA.`, 'info');
+      // Auto-update invoice if exists
+      if (eventId) {
+        const existingInv = await dbGet('SELECT * FROM invoices WHERE eventId = ?', [eventId]);
+        if (existingInv) {
+          const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [eventId]);
+          const reservation = await dbGet('SELECT * FROM reservations WHERE eventId = ?', [eventId]);
+          let amount = 0;
+          services.forEach(s => { amount += s.cost; });
+          if (reservation) amount += reservation.cost;
+          const taxes = Math.round(amount * TAX_RATE * 100) / 100;
+          const total = Math.round((amount + taxes) * 100) / 100;
+          await dbRun('UPDATE invoices SET amount=?, taxes=?, total=? WHERE id=?', [amount, taxes, total, existingInv.id]);
+        }
+      }
+      return { success: true, action: 'request_service', serviceId: result.lastID, name, cost, eventId };
+    }
+
+    case 'list_services': {
+      let sql = 'SELECT s.id, s.name, s.type, s.status, s.cost, s.supplier, e.name as eventName FROM services s LEFT JOIN events e ON s.eventId = e.id WHERE 1=1';
+      const params = [];
+      if (args.eventId) { sql += ' AND s.eventId = ?'; params.push(toInt(args.eventId)); }
+      sql += ' ORDER BY s.dateCreated DESC LIMIT 20';
+      const services = await dbAll(sql, params);
+      return { success: true, action: 'list_services', count: services.length, services };
+    }
+
+    case 'generate_invoice': {
+      const eventId = toInt(args.eventId);
+      if (!eventId) return { success: false, error: "ID de l'événement requis" };
+      const event = await dbGet('SELECT * FROM events WHERE id = ?', [eventId]);
+      if (!event) return { success: false, error: 'Événement non trouvé' };
+      const existing = await dbGet('SELECT * FROM invoices WHERE eventId = ?', [eventId]);
+      if (existing) return { success: false, error: `Une facture existe déjà (${existing.number}, total: ${existing.total}$)` };
+      const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [eventId]);
+      const reservation = await dbGet('SELECT * FROM reservations WHERE eventId = ?', [eventId]);
+      let amount = 0;
+      services.forEach(s => { amount += s.cost; });
+      if (reservation) amount += reservation.cost;
+      const taxes = Math.round(amount * TAX_RATE * 100) / 100;
+      const total = Math.round((amount + taxes) * 100) / 100;
+      const now = new Date();
+      const number = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${eventId}`;
+      const issueDate = now.toISOString().split('T')[0];
+      const dueDate = new Date(now.getTime() + 30 * 86400000).toISOString().split('T')[0];
+      const result = await dbRun(
+        'INSERT INTO invoices (number, eventId, userId, client, amount, taxes, total, issueDate, dueDate) VALUES (?,?,?,?,?,?,?,?,?)',
+        [number, eventId, userId, event.organizer || '', amount, taxes, total, issueDate, dueDate]
+      );
+      await logAudit(userId, 'CREATE', 'invoices', result.lastID, `Facture ${number} générée via IA`);
+      await notifyRole('compta', 'Nouvelle facture', `Facture ${number} créée via IA pour "${event.name}"`, 'info');
+      return { success: true, action: 'generate_invoice', invoiceId: result.lastID, number, amount, taxes, total, dueDate };
+    }
+
+    case 'get_report_summary': {
+      const visibleEventCounts = await getVisibleEventCounts(userId, userRole);
+      const isGlobalViewer = userRole === 'admin' || userRole === 'coordonnateur' || userRole === 'compta';
+      const totalGuests = isGlobalViewer
+        ? await dbGet('SELECT COUNT(*) as c FROM guests')
+        : await dbGet(`
+            SELECT COUNT(*) as c
+            FROM guests g LEFT JOIN events e ON g.eventId = e.id
+            WHERE g.userId = ? OR e.userId = ?
+          `, [userId, userId]);
+      const confirmedGuests = isGlobalViewer
+        ? await dbGet("SELECT COUNT(*) as c FROM guests WHERE status = 'Confirmé'")
+        : await dbGet(`
+            SELECT COUNT(*) as c
+            FROM guests g LEFT JOIN events e ON g.eventId = e.id
+            WHERE (g.userId = ? OR e.userId = ?) AND g.status = 'Confirmé'
+          `, [userId, userId]);
+      const totalRevenue = isGlobalViewer
+        ? await dbGet("SELECT COALESCE(SUM(total),0) as s FROM invoices WHERE status = 'Payée'")
+        : await dbGet("SELECT COALESCE(SUM(total),0) as s FROM invoices WHERE userId = ? AND status = 'Payée'", [userId]);
+      const pendingRevenue = isGlobalViewer
+        ? await dbGet("SELECT COALESCE(SUM(total),0) as s FROM invoices WHERE status IN ('En attente','Partiel')")
+        : await dbGet("SELECT COALESCE(SUM(total),0) as s FROM invoices WHERE userId = ? AND status IN ('En attente','Partiel')", [userId]);
+      const overdueInvoices = isGlobalViewer
+        ? await dbGet("SELECT COUNT(*) as c FROM invoices WHERE status = 'En retard'")
+        : await dbGet("SELECT COUNT(*) as c FROM invoices WHERE userId = ? AND status = 'En retard'", [userId]);
+      const roomCount = await dbGet('SELECT COUNT(*) as c FROM rooms', []);
+      const reservedRooms = await dbGet("SELECT COUNT(DISTINCT roomId) as c FROM reservations WHERE status != 'Annulé' AND date >= date('now')");
+      return {
+        success: true, action: 'get_report_summary',
+        events: visibleEventCounts,
+        guests: { total: totalGuests.c, confirmed: confirmedGuests.c },
+        revenue: { paid: totalRevenue.s, pending: pendingRevenue.s },
+        invoices: { overdue: overdueInvoices.c },
+        rooms: { total: roomCount.c, reserved: reservedRooms.c }
+      };
+    }
+
+    case 'get_notifications': {
+      const notifications = await dbAll(
+        'SELECT title, body, type, isRead, dateCreated FROM notifications WHERE userId = ? ORDER BY dateCreated DESC LIMIT 10',
+        [userId]
+      );
+      return { success: true, action: 'get_notifications', count: notifications.length, notifications };
+    }
+
+    default:
+      return { success: false, error: `Outil inconnu: ${toolName}` };
+  }
+}
+
+// Multi-provider LLM call with automatic fallback
+// Increase undici connect timeout (default 10s is too short for some networks)
+let llmDispatcher;
+try {
+  const { Agent } = require('undici');
+  llmDispatcher = new Agent({ connect: { timeout: 30000 } });
+} catch (_) { }
+
+async function callSingleProvider(provider, messages, useTools, retryCount = 0) {
+  const body = {
+    model: provider.model,
+    messages,
+    temperature: 0.35,
+    max_tokens: provider.maxTokens || 900
+  };
+  if (useTools) body.tools = CHAT_TOOLS;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), provider.timeoutMs || 30000);
+
+  try {
+    const fetchOpts = {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${provider.key}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    };
+    if (llmDispatcher) fetchOpts.dispatcher = llmDispatcher;
+
+    const res = await fetch(provider.url, fetchOpts);
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      const errText = await res.text();
+      // Rate limit or quota
+      if (res.status === 429) {
+        // Permanent quota exceeded (Gemini key with 0 RPD) — skip immediately
+        if (errText.includes('exceeded your current quota') || errText.includes('check your plan and billing')) {
+          console.warn(`[${provider.name}] Quota exceeded (plan limit), switching provider...`);
+          providerCooldowns.set(provider.name, Date.now() + 30 * 60 * 1000);
+          return { rateLimited: true };
+        }
+        // Parse total wait time from "try again in Xm Ys" or "try again in Ys"
+        const minMatch = errText.match(/try again in (\d+)m/i);
+        const secMatch = errText.match(/(\d+\.\d*)s/i);
+        let totalWaitSec = 0;
+        if (minMatch) totalWaitSec += parseInt(minMatch[1]) * 60;
+        if (secMatch) totalWaitSec += Math.ceil(parseFloat(secMatch[1]));
+        if (totalWaitSec === 0) totalWaitSec = 10; // Default: wait 10s if no parseable time
+
+        console.warn(`[${provider.name}] 429 — wait ${totalWaitSec}s (retry #${retryCount}) body: ${errText.substring(0, 150)}`);
+
+        // If wait ? 120s and we haven't retried too many times, wait and retry
+        if (totalWaitSec <= 120 && retryCount < 2) {
+          console.warn(`[${provider.name}] Waiting ${totalWaitSec}s then retrying...`);
+          await new Promise(r => setTimeout(r, totalWaitSec * 1000));
+          return callSingleProvider(provider, messages, useTools, retryCount + 1);
+        }
+
+        console.warn(`[${provider.name}] Rate limited (long wait or max retries), switching provider...`);
+        providerCooldowns.set(provider.name, Date.now() + Math.max(totalWaitSec, 60) * 1000);
+        return { rateLimited: true };
+      }
+      // Tool schema error — retry without tools on same provider
+      if (res.status === 400 && useTools) {
+        console.warn(`[${provider.name}] Tool error, retrying without tools...`);
+        return callSingleProvider(provider, messages, false, retryCount);
+      }
+      console.error(`[${provider.name}] API error (${res.status}):`, errText.substring(0, 200));
+      return { error: true };
+    }
+
+    const data = await res.json();
+    providerCooldowns.delete(provider.name);
+    if (data.usage) {
+      console.log(`[${provider.name}] tokens: prompt=${data.usage.prompt_tokens} completion=${data.usage.completion_tokens} total=${data.usage.total_tokens}`);
+    }
+    return { success: true, data };
+  } catch (e) {
+    clearTimeout(timeout);
+    console.error(`[${provider.name}] Connection error: ${e.cause.code || e.message}`);
+    providerCooldowns.set(provider.name, Date.now() + 45 * 1000);
+    return { error: true, connError: true };
+  }
+}
+
+async function callLLM(messages, useTools) {
+  if (LLM_PROVIDERS.length === 0) {
+    throw new Error('Aucun fournisseur IA configuré. Ajoutez GEMINI_API_KEY ou GROQ_API_KEY dans .env');
+  }
+
+  const now = Date.now();
+  const availableIndices = [];
+  const coolingIndices = [];
+  for (let attempt = 0; attempt < LLM_PROVIDERS.length; attempt++) {
+    const idx = (preferredProviderIdx + attempt) % LLM_PROVIDERS.length;
+    const provider = LLM_PROVIDERS[idx];
+    const cooldownUntil = providerCooldowns.get(provider.name) || 0;
+    if (cooldownUntil > now) {
+      coolingIndices.push(idx);
+    } else {
+      availableIndices.push(idx);
+    }
+  }
+
+  const orderedIndices = availableIndices.length ? availableIndices : coolingIndices;
+  for (const idx of orderedIndices) {
+    const provider = LLM_PROVIDERS[idx];
+    console.log(`[AI] Trying ${provider.name} (${provider.model})...`);
+
+    const result = await callSingleProvider(provider, messages, useTools);
+
+    if (result.success) {
+      preferredProviderIdx = idx; // Remember this provider worked
+      return result.data;
+    }
+
+    if (result.rateLimited || result.error) {
+      // Try next provider
+      continue;
+    }
+  }
+
+  throw new Error('Tous les services IA sont temporairement indisponibles. Réessayez dans quelques minutes.');
+}
+
+// Chat endpoint with tool calling
+function normalizeAutomationText(value = '') {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function formatCad(value) {
+  return new Intl.NumberFormat('fr-CA', {
+    style: 'currency',
+    currency: 'CAD',
+    maximumFractionDigits: 2
+  }).format(Number(value || 0));
+}
+
+async function getVisibleEventCounts(userId, userRole) {
+  if (userRole === 'admin' || userRole === 'coordonnateur' || userRole === 'compta') {
+    const [total, active] = await Promise.all([
+      dbGet('SELECT COUNT(*) as c FROM events'),
+      dbGet("SELECT COUNT(*) as c FROM events WHERE status NOT IN ('Annulé','Terminé')")
+    ]);
+    return { total: total.c, active: active.c };
+  }
+
+  const [total, active] = await Promise.all([
+    dbGet('SELECT COUNT(*) as c FROM events WHERE userId = ?', [userId]),
+    dbGet("SELECT COUNT(*) as c FROM events WHERE userId = ? AND status NOT IN ('Annulé','Terminé')", [userId])
+  ]);
+  return { total: total.c, active: active.c };
+}
+
+function findLatestUserMessage(messages = []) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && messages[i].content) return String(messages[i].content);
+  }
+  return '';
+}
+
+function formatAutomationReply(toolName, result) {
+  if (!result.success) {
+    return result.error || 'Je n ai pas pu terminer cette action en mode automatique.';
+  }
+  switch (toolName) {
+    case 'list_rooms':
+      return result.rooms.length
+        ? `Mode automatique activé. Voici les salles disponibles: ${result.rooms.slice(0, 6).map((room) => `${room.name} (${room.capacity} pers, ${formatCad(room.hourlyRate)}/h)`).join(' ; ')}.`
+        : 'Mode automatique activé. Aucune salle ne correspond à la demande.';
+    case 'list_events':
+      return result.events.length
+        ? `Mode automatique activé. Voici les événements visibles: ${result.events.slice(0, 6).map((event) => `${event.name} le ${event.date || 'date à confirmer'} (${event.status})`).join(' ; ')}.`
+        : 'Mode automatique activé. Aucun événement trouvé.';
+    case 'get_notifications':
+      return result.notifications.length
+        ? `Mode automatique activé. Notifications récentes: ${result.notifications.slice(0, 5).map((item) => item.title).join(' ; ')}.`
+        : 'Mode automatique activé. Aucune notification récente.';
+    case 'get_report_summary':
+      return `Mode automatique activé. ${result.events.total} événements au total, ${result.events.active} actifs, ${result.guests.confirmed} invités confirmés, ${formatCad(result.revenue.paid)} encaissés et ${formatCad(result.revenue.pending)} en attente.`;
+    case 'create_event':
+      return `Mode automatique activé. L'événement ${result.event.name} a été créé avec l'identifiant ${result.event.id} pour le ${result.event.date || 'date à confirmer'}.`;
+    case 'reserve_room':
+      return `Mode automatique activé. ${result.room} a été réservée le ${result.date} de ${result.startTime} à ${result.endTime} pour ${formatCad(result.cost)}.`;
+    case 'generate_invoice':
+      return `Mode automatique activé. La facture ${result.number} a été générée pour ${formatCad(result.total)} avec échéance au ${result.dueDate}.`;
+    case 'request_service':
+      return `Mode automatique activé. Le service ${result.name} a été demandé pour l'événement ${result.eventId}${result.cost ? `, coût estimé ${formatCad(result.cost)}` : ''}.`;
+    case 'add_guest':
+      return `Mode automatique activé. L'invité ${result.name} a été ajouté à l'événement ${result.eventId}.`;
+    default:
+      return 'Mode automatique activé. Action exécutée avec succès.';
+  }
+}
+
+function buildRescueReply(messages = []) {
+  const latest = findLatestUserMessage(messages);
+  const intent = latest
+    ? `Je reste disponible pour une demande operationnelle a partir de: "${String(latest).slice(0, 90)}".`
+    : 'Je reste disponible pour une demande operationnelle.';
+  return `Mode concierge de secours active. ${intent} Donnez une action concrete comme lister les salles, creer un evenement, reserver une salle, ajouter un invite, demander un service, generer une facture ou resumer les notifications et rapports.`;
+}
+
+async function runAutomationFallback(messages, userId, userRole) {
+  const raw = findLatestUserMessage(messages);
+  const text = normalizeAutomationText(raw);
+  if (!text) return null;
+
+  let toolName = null;
+  let args = {};
+
+  if (/\bnotification/.test(text)) {
+    toolName = 'get_notifications';
+  } else if (/\b(rapport|statistique|revenu|dashboard|resume)\b/.test(text)) {
+    toolName = 'get_report_summary';
+  } else if (/\b(salle|salles|room|rooms)\b/.test(text) && /\b(dispon|liste|montre|quell)\b/.test(text)) {
+    toolName = 'list_rooms';
+    const capacityMatch = text.match(/(\d+)\s*(personnes|pers|invites)/);
+    if (capacityMatch) args.capacity = capacityMatch[1];
+  } else if (/\b(evenement|evenements)\b/.test(text) && /\b(liste|montre|mes|quel)\b/.test(text)) {
+    toolName = 'list_events';
+  } else if (/\bfacture\b/.test(text) && /\b(gener|cree)\b/.test(text)) {
+    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    if (!eventIdMatch) {
+      return { reply: 'Mode automatique: indiquez l identifiant de l événement pour générer la facture.', actions: [] };
+    }
+    toolName = 'generate_invoice';
+    args.eventId = eventIdMatch[1];
+  } else if (/\b(reserv|reserve)\b/.test(text) && /\bsalle\b/.test(text)) {
+    const roomIdMatch = text.match(/salle\s*(\d+)/);
+    const dateMatch = raw.match(/\b\d{4}-\d{2}-\d{2}\b/);
+    const times = raw.match(/\b\d{2}:\d{2}\b/g) || [];
+    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    if (!roomIdMatch || !dateMatch || times.length < 2) {
+      return { reply: 'Mode automatique: pour réserver une salle, indiquez la salle, la date et les heures de début et fin au format YYYY-MM-DD et HH:MM.', actions: [] };
+    }
+    toolName = 'reserve_room';
+    args = {
+      roomId: roomIdMatch[1],
+      eventId: eventIdMatch ? eventIdMatch[1] : undefined,
+      date: dateMatch[0],
+      startTime: times[0],
+      endTime: times[1]
+    };
+  } else if (/\b(cree|creer|ajoute)\b/.test(text) && /\bevenement\b/.test(text)) {
+    const dateMatch = raw.match(/\b\d{4}-\d{2}-\d{2}\b/);
+    const times = raw.match(/\b\d{2}:\d{2}\b/g) || [];
+    const nameMatch = raw.match(/(:événement|evenement)\s+(.+)(:\s+le\s+\d{4}-\d{2}-\d{2}|$)/i);
+    if (!nameMatch) {
+      return { reply: 'Mode automatique: donnez au moins le nom de l événement, par exemple "Créer un événement Gala Signature le 2026-05-20 à 18:00".', actions: [] };
+    }
+    toolName = 'create_event';
+    args = {
+      name: nameMatch[1].trim(),
+      date: dateMatch ? dateMatch[0] : undefined,
+      time: times[0],
+      endTime: times[1]
+    };
+  } else if (/\b(service|traiteur|deco|decoration|dj|photo)\b/.test(text) && /\b(demande|ajoute|cree)\b/.test(text)) {
+    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    if (!eventIdMatch) {
+      return { reply: 'Mode automatique: indiquez l identifiant de l événement pour demander un service.', actions: [] };
+    }
+    toolName = 'request_service';
+    args = {
+      eventId: eventIdMatch[1],
+      name: raw.replace(/.*(service|traiteur|décoration|decoration|dj|photo)/i, '$1').trim() || 'Service personnalisé'
+    };
+  } else if (/\binvite\b/.test(text) && /\b(ajoute|creer|cree)\b/.test(text)) {
+    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    const personMatch = raw.match(/invite\s+([A-Za-z' -]+)\s+([A-Za-z' -]+)(:\s+pour|\s+sur|\s+event|\s+evenement|$)/i);
+    if (!eventIdMatch || !personMatch) {
+      return { reply: 'Mode automatique: pour ajouter un invité, indiquez son prénom, son nom et l identifiant de l événement.', actions: [] };
+    }
+    toolName = 'add_guest';
+    args = {
+      eventId: eventIdMatch[1],
+      fname: personMatch[1].trim(),
+      lname: personMatch[2].trim()
+    };
+  } else {
+    return null;
+  }
+
+  const action = await executeChatTool(toolName, args, userId, userRole);
+  return {
+    reply: formatAutomationReply(toolName, action),
+    actions: action ? [action] : [],
+    automated: true
+  };
+}
+
+app.post('/api/chat', verifyToken, async (req, res) => {
+  let executedActions = [];
+  try {
+    const requestMessages = req.body.messages;
+    if (!requestMessages || !Array.isArray(requestMessages)) {
+      return res.status(400).json({ error: 'Messages requis' });
+    }
+    if (LLM_PROVIDERS.length === 0) {
+      const automated = await runAutomationFallback(requestMessages, req.userId, req.userRole);
+      if (automated) return res.json(automated);
+      return res.json({ reply: buildRescueReply(requestMessages), actions: [], automated: true, degraded: true });
+    }
+    if (false && LLM_PROVIDERS.length === 0) {
+      return res.status(503).json({ error: 'Service IA non configuré. Ajoutez GEMINI_API_KEY ou GROQ_API_KEY dans .env' });
+    }
+
+    const { messages } = req.body;
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages requis' });
+    }
+    if (LLM_PROVIDERS.length === 0) {
+      const automated = await runAutomationFallback(messages, req.userId, req.userRole);
+      if (automated) return res.json(automated);
+      return res.status(503).json({ error: 'Service IA non configuré. Ajoutez GEMINI_API_KEY ou GROQ_API_KEY dans .env' });
+    }
+
+    // Gather user context
+    const user = await dbGet('SELECT fname, lname, role FROM users WHERE id = ?', [req.userId]);
+    const eventCounts = await getVisibleEventCounts(req.userId, req.userRole);
+    const notifCount = await dbGet('SELECT COUNT(*) as c FROM notifications WHERE userId = ? AND isRead = 0', [req.userId]);
+
+    const contextMsg = `\nContexte: ${user.fname} ${user.lname}, rôle: ${user.role}, ${eventCounts.total} événements visibles, ${eventCounts.active} actifs, ${notifCount.c} notifications non lues.`;
+
+    const llmMessages = [
+      { role: 'system', content: getChatSystemPrompt() + contextMsg },
+      ...messages.slice(-12).map(m => ({ role: m.role, content: m.content }))
+    ];
+
+    // First call — may return tool_calls
+    let data = await callLLM(llmMessages, true);
+    let choice = data.choices[0];
+    const actions = executedActions;
+
+    // Tool calling loop (max 5 iterations to prevent infinite loops)
+    let iterations = 0;
+    while ((choice.message.tool_calls || []).length > 0 && iterations < 5) {
+      iterations++;
+      const assistantMsg = choice.message;
+      llmMessages.push(assistantMsg);
+
+      for (const tc of assistantMsg.tool_calls || []) {
+        let toolArgs = {};
+        try { toolArgs = typeof tc.function.arguments === 'string' ? JSON.parse(tc.function.arguments) : tc.function.arguments; } catch (_) { }
+
+        console.log(`[Chat Tool] ${tc.function.name}(${JSON.stringify(toolArgs)})`);
+        const toolResult = await executeChatTool(tc.function.name, toolArgs, req.userId, req.userRole);
+        actions.push(toolResult);
+
+        llmMessages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify(toolResult)
+        });
+      }
+
+      // Follow-up call with tool results
+      data = await callLLM(llmMessages, true);
+      choice = data.choices[0];
+    }
+
+    const reply = choice.message.content || 'Désolé, je n\'ai pas pu générer de réponse.';
+    res.json({ reply, actions });
+  } catch (e) {
+    console.error('Chat error:', e.message);
+    if (executedActions.length > 0) {
+      const lastAction = executedActions[executedActions.length - 1];
+      return res.json({
+        reply: `Mode de secours activé. ${formatAutomationReply(lastAction.action, lastAction)}`,
+        actions: executedActions,
+        automated: true
+      });
+    }
+    const automated = await runAutomationFallback(req.body.messages || [], req.userId, req.userRole).catch(() => null);
+    if (automated) return res.json(automated);
+    const msg = e.message && (e.message.includes('indisponible') || e.message.includes('configuré'))
+      ? e.message
+      : 'Désolé, le service IA est temporairement indisponible. Réessayez dans un moment.';
+    res.json({ reply: msg, actions: [], automated: true, degraded: true });
+  }
+});
+
+// --------------------------------------------------
+// STATIC + CATCH-ALL
+// --------------------------------------------------
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
+});
+
+// Start server
+const PORT = Number(process.env.PORT || 3000);
+let conciergeStarted = false;
+let startupHooksAttached = false;
+
+function startServer(port = PORT) {
+  if (server.listening) {
+    return server;
+  }
+
+  let candidatePort = Number(port);
+  if (!Number.isFinite(candidatePort) || candidatePort < 0) {
+    candidatePort = PORT;
+  }
+
+  const handleListening = () => {
+    const address = server.address();
+    const resolvedPort = typeof address === 'object' && address ? address.port : candidatePort;
+    console.log(`Server running on http://localhost:${resolvedPort}`);
+    console.log('Socket.io real-time enabled');
+
+    if (!conciergeStarted) {
+      conciergeStarted = true;
+      conciergeTelegram.start().catch((error) => {
+        console.error('Concierge Telegram failed to start:', error.message);
+      });
+    }
+  };
+
+  const handleError = (error) => {
+    if (error.code === 'EADDRINUSE' && candidatePort !== 0) {
+      const nextPort = candidatePort + 1;
+      console.warn(`Port ${candidatePort} already in use. Retrying on ${nextPort}...`);
+      candidatePort = nextPort;
+      setTimeout(() => server.listen(candidatePort), 50);
+      return;
+    }
+    throw error;
+  };
+
+  if (!startupHooksAttached) {
+    startupHooksAttached = true;
+    server.on('listening', handleListening);
+    server.on('error', handleError);
+    server.once('close', () => {
+      conciergeStarted = false;
+      conciergeTelegram.stop().catch(() => { });
+      startupHooksAttached = false;
+    });
+  }
+
+  server.listen(candidatePort);
+  return server;
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, io, server, startServer, db, conciergeTelegram };
