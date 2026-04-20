@@ -996,6 +996,23 @@ function hardenLoginAutofill() {
   });
 }
 
+function selectRole(btn, email) {
+  const { email: emailField, password } = getLoginFields();
+  document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+
+  if (emailField) {
+    emailField.removeAttribute('readonly');
+    emailField.value = email;
+  }
+  if (password) {
+    password.removeAttribute('readonly');
+    password.value = '';
+    password.defaultValue = '';
+    password.focus();
+  }
+}
+
 function goToLogin() {
   document.getElementById('getstarted-screen').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
@@ -1106,6 +1123,9 @@ function doLogout() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('getstarted-screen').style.display = 'flex';
   clearLoginFields();
+  document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
+  const firstRoleButton = document.querySelector('.role-btn');
+  if (firstRoleButton) firstRoleButton.classList.add('active');
   hardenLoginAutofill();
 }
 
@@ -3617,6 +3637,7 @@ async function refreshAfterChatActions(actions) {
 Object.assign(window, {
   goToLogin,
   goToGetStarted,
+  selectRole,
   doLogin,
   doLogout,
   toggleTheme,

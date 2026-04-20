@@ -3558,6 +3558,15 @@ textarea {
           <label>Mot de passe</label>
           <input type="password" id="login-password" placeholder="••••••••••" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" data-form-type="other" readonly>
         </div>
+        <div style="margin-bottom:20px">
+          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">Accès rapide</div>
+          <div class="login-roles">
+            <button class="role-btn active" onclick="selectRole(this,'admin@lapromenade.com')">Administrateur</button>
+            <button class="role-btn" onclick="selectRole(this,'organisateur@lapromenade.com')">Organisateur</button>
+            <button class="role-btn" onclick="selectRole(this,'coordonnateur@lapromenade.com')">Coordonnateur</button>
+            <button class="role-btn" onclick="selectRole(this,'compta@lapromenade.com')">Comptabilité</button>
+          </div>
+        </div>
         <button class="btn-login-connect" onclick="doLogin()">Se connecter</button>
         <div style="text-align:center;margin-top:20px">
           <button style="background:none;border:none;color:var(--text-muted);font-size:12px;cursor:pointer;letter-spacing:1px" onclick="goToGetStarted()">← Retour</button>
