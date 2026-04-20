@@ -167,13 +167,6 @@ function ensureModalFocus(id) {
   if (initial) initial.focus();
 }
 
-const DEV_LOGIN_PRESETS = {
-  admin: { email: 'admin@lapromenade.com', password: 'admin123' },
-  organisateur: { email: 'organisateur@lapromenade.com', password: 'admin123' },
-  coordonnateur: { email: 'coordonnateur@lapromenade.com', password: 'admin123' },
-  compta: { email: 'compta@lapromenade.com', password: 'admin123' }
-};
-
 /* Section */
 let socket = null;
 let socketConnected = false;
@@ -1018,15 +1011,6 @@ function initCursorCircle() {
 }
 
 /* Section */
-function selectRole(btn, email) {
-  document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  document.getElementById('login-email').value = email;
-  const roleKey = email.split('@')[0];
-  const preset = DEV_LOGIN_PRESETS[roleKey === 'admin' ? 'admin' : roleKey] || DEV_LOGIN_PRESETS.admin;
-  document.getElementById('login-password').value = preset.password;
-}
-
 async function doLogin() {
   const email = document.getElementById('login-email').value;
   const password = document.getElementById('login-password').value;
@@ -1078,10 +1062,8 @@ function doLogout() {
   document.getElementById('app').style.display = 'none';
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('getstarted-screen').style.display = 'flex';
-  document.getElementById('login-email').value = DEV_LOGIN_PRESETS.admin.email;
-  document.getElementById('login-password').value = DEV_LOGIN_PRESETS.admin.password;
-  document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
-  document.querySelector('.role-btn').classList.add('active');
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-password').value = '';
 }
 
 /* Section */
@@ -3591,7 +3573,6 @@ async function refreshAfterChatActions(actions) {
 Object.assign(window, {
   goToLogin,
   goToGetStarted,
-  selectRole,
   doLogin,
   doLogout,
   toggleTheme,

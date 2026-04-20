@@ -3552,20 +3552,11 @@ textarea {
         </div>
         <div class="form-group">
           <label>Courriel</label>
-          <input type="email" id="login-email" placeholder="nom@lapromenade.com" value="admin@lapromenade.com">
+          <input type="email" id="login-email" placeholder="nom@lapromenade.com" autocomplete="username">
         </div>
         <div class="form-group">
           <label>Mot de passe</label>
-          <input type="password" id="login-password" placeholder="••••••••••" value="admin123">
-        </div>
-        <div style="margin-bottom:20px">
-          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">Accès rapide de démonstration</div>
-          <div class="login-roles">
-            <button class="role-btn active" onclick="selectRole(this,'admin@lapromenade.com')">Administrateur</button>
-            <button class="role-btn" onclick="selectRole(this,'organisateur@lapromenade.com')">Organisateur</button>
-            <button class="role-btn" onclick="selectRole(this,'coordonnateur@lapromenade.com')">Coordonnateur</button>
-            <button class="role-btn" onclick="selectRole(this,'compta@lapromenade.com')">Comptabilité</button>
-          </div>
+          <input type="password" id="login-password" placeholder="••••••••••" autocomplete="current-password">
         </div>
         <button class="btn-login-connect" onclick="doLogin()">Se connecter</button>
         <div style="text-align:center;margin-top:20px">
