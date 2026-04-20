@@ -954,9 +954,52 @@ const ROLE_LABELS = {
 };
 
 /* Section */
+function getLoginFields() {
+  return {
+    email: document.getElementById('login-email'),
+    password: document.getElementById('login-password')
+  };
+}
+
+function clearLoginFields() {
+  const { email, password } = getLoginFields();
+  [email, password].forEach((field) => {
+    if (!field) return;
+    field.value = '';
+    field.defaultValue = '';
+  });
+}
+
+function unlockLoginField(event) {
+  event.currentTarget.removeAttribute('readonly');
+}
+
+function hardenLoginAutofill() {
+  const { email, password } = getLoginFields();
+  const fields = [email, password].filter(Boolean);
+
+  fields.forEach((field) => {
+    field.setAttribute('readonly', 'readonly');
+    field.setAttribute('autocomplete', 'new-password');
+    field.setAttribute('data-lpignore', 'true');
+    field.setAttribute('data-1p-ignore', 'true');
+    field.setAttribute('data-form-type', 'other');
+    field.addEventListener('focus', unlockLoginField, { once: true });
+    field.addEventListener('pointerdown', unlockLoginField, { once: true });
+  });
+
+  [0, 100, 400, 900].forEach((delay) => {
+    setTimeout(() => {
+      if (fields.includes(document.activeElement)) return;
+      clearLoginFields();
+    }, delay);
+  });
+}
+
 function goToLogin() {
   document.getElementById('getstarted-screen').style.display = 'none';
   document.getElementById('login-screen').style.display = 'flex';
+  hardenLoginAutofill();
 }
 
 function goToGetStarted() {
@@ -1062,8 +1105,8 @@ function doLogout() {
   document.getElementById('app').style.display = 'none';
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('getstarted-screen').style.display = 'flex';
-  document.getElementById('login-email').value = '';
-  document.getElementById('login-password').value = '';
+  clearLoginFields();
+  hardenLoginAutofill();
 }
 
 /* Section */
@@ -3347,6 +3390,7 @@ window.addEventListener('DOMContentLoaded', () => {
   initLampParticles();
   initCursorCircle();
   enhanceInteractiveAccessibility(document);
+  hardenLoginAutofill();
   if (TOKEN && CURRENT_USER) {
     currentUser = CURRENT_USER;
     currentRole = CURRENT_USER.role;
