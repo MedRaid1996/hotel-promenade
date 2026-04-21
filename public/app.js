@@ -952,6 +952,14 @@ const NAV_CONFIG = {
 const ROLE_LABELS = {
   admin:'Administrateur', organisateur:'Organisateur', coordonnateur:'Coordonnateur', compta:'Comptabilité'
 };
+const QUICK_LOGIN_ACCOUNTS = {
+  'admin@lapromenade.com': 'admin',
+  'organisateur@lapromenade.com': 'organisateur',
+  'coordonnateur@lapromenade.com': 'coordonnateur',
+  'compta@lapromenade.com': 'compta'
+};
+let selectedLoginEmail = 'admin@lapromenade.com';
+let selectedLoginRole = 'admin';
 
 /* Section */
 function getLoginFields() {
@@ -998,12 +1006,15 @@ function hardenLoginAutofill() {
 
 function selectRole(btn, email) {
   const { email: emailField, password } = getLoginFields();
+  const normalizedEmail = String(email || '').trim().toLowerCase();
   document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
+  selectedLoginEmail = normalizedEmail;
+  selectedLoginRole = QUICK_LOGIN_ACCOUNTS[normalizedEmail] || '';
 
   if (emailField) {
     emailField.removeAttribute('readonly');
-    emailField.value = email;
+    emailField.value = normalizedEmail;
   }
   if (password) {
     password.removeAttribute('readonly');
@@ -1072,13 +1083,22 @@ function initCursorCircle() {
 
 /* Section */
 async function doLogin() {
-  const email = document.getElementById('login-email').value;
+  const email = document.getElementById('login-email').value.trim().toLowerCase();
   const password = document.getElementById('login-password').value;
   if (!email || !password) { showToast('Courriel et mot de passe requis.', 'error'); return; }
+  if (selectedLoginEmail && email !== selectedLoginEmail) {
+    const selectedLabel = ROLE_LABELS[selectedLoginRole] || 'sélectionné';
+    showToast(`Le choix ${selectedLabel} doit utiliser ${selectedLoginEmail}.`, 'error');
+    return;
+  }
 
   try {
     setLoginBusy(true, 'Connexion...');
     const data = await apiLogin(email, password);
+    if (selectedLoginRole && data.user.role !== selectedLoginRole) {
+      apiLogout();
+      throw new Error(`Ce compte est ${ROLE_LABELS[data.user.role] || data.user.role}, pas ${ROLE_LABELS[selectedLoginRole] || selectedLoginRole}.`);
+    }
     currentUser = data.user;
     currentRole = data.user.role;
 
@@ -1126,6 +1146,8 @@ function doLogout() {
   document.querySelectorAll('.role-btn').forEach(b => b.classList.remove('active'));
   const firstRoleButton = document.querySelector('.role-btn');
   if (firstRoleButton) firstRoleButton.classList.add('active');
+  selectedLoginEmail = 'admin@lapromenade.com';
+  selectedLoginRole = 'admin';
   hardenLoginAutofill();
 }
 
