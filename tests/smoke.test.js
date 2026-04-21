@@ -20,6 +20,18 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function futureDate(days = 45) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function pastDate(days = 1) {
+  const date = new Date();
+  date.setDate(date.getDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function api(pathname, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, options);
   const contentType = response.headers.get('content-type') || '';
@@ -129,7 +141,7 @@ test('users cannot access another organizer event detail', async () => {
     body: JSON.stringify({
       name: 'Salon Signature',
       type: 'Conférence',
-      date: '2026-06-15',
+      date: futureDate(45),
       time: '10:00'
     })
   });
@@ -139,6 +151,75 @@ test('users cannot access another organizer event detail', async () => {
     headers: { 'Authorization': `Bearer ${visitorToken}` }
   });
   assert.equal(denied.response.status, 403);
+});
+
+test('date and room reservation rules are enforced', async () => {
+  const adminToken = await login('admin@lapromenade.com', 'AdminTestPass123!');
+  const roomList = await api('/api/rooms', {
+    headers: { 'Authorization': `Bearer ${adminToken}` }
+  });
+  assert.equal(roomList.response.status, 200);
+  const roomId = roomList.body.rooms[0].id;
+  const bookingDate = futureDate(90);
+
+  const pastEvent = await api('/api/events', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({
+      name: 'Impossible Past Event',
+      date: pastDate(),
+      time: '09:00'
+    })
+  });
+  assert.equal(pastEvent.response.status, 400);
+
+  const pastReservation = await api('/api/rooms/reserve', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({
+      roomId,
+      date: pastDate(),
+      startTime: '09:00',
+      endTime: '10:00'
+    })
+  });
+  assert.equal(pastReservation.response.status, 400);
+
+  const firstReservation = await api('/api/rooms/reserve', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({
+      roomId,
+      date: bookingDate,
+      startTime: '10:00',
+      endTime: '12:00'
+    })
+  });
+  assert.equal(firstReservation.response.status, 201, JSON.stringify(firstReservation.body));
+
+  const overlappingReservation = await api('/api/rooms/reserve', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({
+      roomId,
+      date: bookingDate,
+      startTime: '11:00',
+      endTime: '13:00'
+    })
+  });
+  assert.equal(overlappingReservation.response.status, 409);
 });
 
 test('payments and reports are scoped to the owner', async () => {
@@ -167,7 +248,7 @@ test('payments and reports are scoped to the owner', async () => {
     body: JSON.stringify({
       name: 'Gala Privé',
       type: 'Gala',
-      date: '2026-07-01',
+      date: futureDate(60),
       time: '18:00'
     })
   });

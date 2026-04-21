@@ -18,6 +18,12 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function futureDate(days = 30) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 function collectRequestBody(req) {
   return new Promise((resolve) => {
     const chunks = [];
@@ -114,6 +120,7 @@ test.after(async () => {
 
 test('admin concierge debrief sends Telegram summary and French audio', { timeout: 120000 }, async () => {
   const adminToken = await login('admin@lapromenade.com', 'AdminTestPass123!');
+  const eventDate = futureDate(30);
 
   const createEvent = await api('/api/events', {
     method: 'POST',
@@ -124,7 +131,7 @@ test('admin concierge debrief sends Telegram summary and French audio', { timeou
     body: JSON.stringify({
       name: 'Gala Telegram Test',
       type: 'Gala',
-      date: '2026-04-08',
+      date: eventDate,
       time: '18:00',
       endTime: '23:00',
       contact: 'client@example.com'
@@ -147,7 +154,7 @@ test('admin concierge debrief sends Telegram summary and French audio', { timeou
     body: JSON.stringify({
       roomId,
       eventId: createEvent.body.id,
-      date: '2026-04-08',
+      date: eventDate,
       startTime: '18:00',
       endTime: '23:00'
     })
@@ -180,7 +187,7 @@ test('admin concierge debrief sends Telegram summary and French audio', { timeou
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${adminToken}`
     },
-    body: JSON.stringify({ date: '2026-04-08' })
+    body: JSON.stringify({ date: eventDate })
   });
 
   assert.equal(debrief.response.status, 200, JSON.stringify(debrief.body));

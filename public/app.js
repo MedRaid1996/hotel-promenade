@@ -93,6 +93,88 @@ function getActiveReservations() {
   return DATA.reservations.filter(isActiveReservation);
 }
 
+function isValidEmailAddress(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || '').trim());
+}
+
+function isValidDateKey(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return false;
+  const [year, month, day] = String(value).split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function isValidTimeValue(value) {
+  return /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value || ''));
+}
+
+function timeToMinutes(value) {
+  if (!isValidTimeValue(value)) return null;
+  const [hours, minutes] = String(value).split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+function isPastDateTime(dateKey, timeValue = '00:00') {
+  if (!isValidDateKey(dateKey) || !isValidTimeValue(timeValue)) return false;
+  const now = new Date();
+  const today = getTodayDateKey();
+  const nowTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  if (dateKey < today) return true;
+  if (dateKey > today) return false;
+  return timeValue <= nowTime;
+}
+
+function isPastDateOnly(dateKey) {
+  return isValidDateKey(dateKey) && dateKey < getTodayDateKey();
+}
+
+function isLockedEvent(event) {
+  const status = normalizeStatusValue(event?.status);
+  return status === 'annule' || status === 'termine';
+}
+
+function isUsableEvent(event) {
+  if (!event || isLockedEvent(event)) return false;
+  if (event.date && isPastDateTime(event.date, event.time || '23:59')) return false;
+  return true;
+}
+
+function getClickedButton() {
+  const element = document.activeElement;
+  return element && element.tagName === 'BUTTON' ? element : null;
+}
+
+function setActionBusy(button, isBusy, label = 'Traitement...') {
+  if (!button) return;
+  if (isBusy) {
+    button.dataset.originalText = button.dataset.originalText || button.textContent;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = label;
+  } else {
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+    if (button.dataset.originalText) {
+      button.textContent = button.dataset.originalText;
+      delete button.dataset.originalText;
+    }
+  }
+}
+
+function getReservationConflict(roomId, date, startTime, endTime) {
+  const start = timeToMinutes(startTime);
+  const end = timeToMinutes(endTime);
+  if (start === null || end === null) return null;
+  return DATA.reservations.find(res => {
+    if (!isActiveReservation(res)) return false;
+    if (Number(res.roomId) !== Number(roomId) || res.date !== date) return false;
+    const existingStart = timeToMinutes(res.startTime);
+    const existingEnd = timeToMinutes(res.endTime);
+    if (existingStart === null || existingEnd === null) return false;
+    return existingStart < end && existingEnd > start;
+  }) || null;
+}
+
 function getFocusableElements(container) {
   return Array.from(container.querySelectorAll(FOCUSABLE_SELECTOR))
     .filter(el => !el.hasAttribute('hidden') && el.offsetParent !== null);
@@ -1804,12 +1886,20 @@ function initRoomsFullCalendar() {
     
     // Date select - create new event
     select: function(info) {
+      const selectedDate = info.startStr.split('T')[0];
+      if (isPastDateOnly(selectedDate)) {
+        roomsCalendar.unselect();
+        showToast('Impossible de créer un événement dans une date passée.', 'error');
+        return;
+      }
       // Pre-fill event modal with selected date
       const dateInput = document.getElementById('ev-date');
       if (dateInput) {
-        dateInput.value = info.startStr.split('T')[0];
+        dateInput.min = getTodayDateKey();
+        dateInput.value = selectedDate;
       }
       openEventModal();
+      if (dateInput) dateInput.value = selectedDate;
       roomsCalendar.unselect();
     },
     
@@ -1825,6 +1915,11 @@ function initRoomsFullCalendar() {
       try {
         const newDate = info.event.startStr.split('T')[0];
         const newTime = info.event.start.toTimeString().slice(0, 5);
+        if (isPastDateTime(newDate, newTime)) {
+          info.revert();
+          showToast('Impossible de déplacer un événement dans le passé.', 'error');
+          return;
+        }
         
         await updateEvent(parseInt(event.id), {
           date: newDate,
@@ -1856,6 +1951,16 @@ function initRoomsFullCalendar() {
       try {
         const startTime = info.event.start.toTimeString().slice(0, 5);
         const endTime = info.event.end ? info.event.end.toTimeString().slice(0, 5) : null;
+        if (isPastDateTime(info.event.startStr.split('T')[0], startTime)) {
+          info.revert();
+          showToast('Impossible de placer un événement dans le passé.', 'error');
+          return;
+        }
+        if (endTime && timeToMinutes(endTime) <= timeToMinutes(startTime)) {
+          info.revert();
+          showToast('L’heure de fin doit être après l’heure de début.', 'error');
+          return;
+        }
         
         await updateEvent(parseInt(event.id), {
           time: startTime,
@@ -2002,6 +2107,7 @@ function editEvent(id) {
   document.getElementById('event-modal-title').textContent = 'Modifier l\'événement';
   document.getElementById('ev-name').value = e.name || '';
   document.getElementById('ev-type').value = e.type || 'Conférence';
+  document.getElementById('ev-date').min = getTodayDateKey();
   document.getElementById('ev-date').value = e.date || '';
   document.getElementById('ev-time').value = e.time || '';
   document.getElementById('ev-budget').value = e.budget || '';
@@ -2014,6 +2120,7 @@ function editEvent(id) {
 }
 
 async function cancelEvent(id) {
+  const button = getClickedButton();
   const e = DATA.events.find(ev => ev.id === id);
   if (!e) return;
   
@@ -2027,14 +2134,17 @@ async function cancelEvent(id) {
   
   if (confirmed) {
     try {
+      setActionBusy(button, true, 'Annulation...');
       showLoading('Annulation en cours...');
-      await updateEvent(id, { name: e.name, type: e.type, date: e.date, time: e.time, duration: e.duration, status: 'Annul', budget: e.budget, guests: e.guests, room: e.room, organizer: e.organizer, contact: e.contact, description: e.description });
+      await updateEvent(id, { name: e.name, type: e.type, date: e.date, time: e.time, duration: e.duration, status: 'Annulé', budget: e.budget, guests: e.guests, room: e.room, organizer: e.organizer, contact: e.contact, description: e.description });
       hideLoading();
       showSuccess('Événement annulé', `"${e.name}" a été annulé avec succès.`);
       renderEvents();
     } catch (err) {
       hideLoading();
       showError('Erreur', err.message || 'Impossible d\'annuler l\'événement.');
+    } finally {
+      setActionBusy(button, false);
     }
   }
 }
@@ -2075,7 +2185,13 @@ async function renderRooms() {
       <td>${formatDate(res.date)}</td>
       <td>${res.startTime || ''} – ${res.endTime || ''}</td>
       <td>${statusBadge(res.status)}</td>
-      <td>${res.status !== 'Confirmé' ? `<button class="btn btn-sm" onclick="confirmReservation(${res.id})">Confirmer</button>` : '<span style="color:var(--success);font-size:12px">✓</span>'}</td>
+      <td>${
+        res.status === 'Confirmé'
+          ? '<span style="color:var(--success);font-size:12px">✓</span>'
+          : isPastDateTime(res.date, res.startTime || '00:00')
+            ? '<span style="color:var(--text-muted);font-size:12px">Passée</span>'
+            : `<button class="btn btn-sm" onclick="confirmReservation(${res.id})">Confirmer</button>`
+      }</td>
     </tr>
   `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucune réservation</td></tr>';
 
@@ -2087,11 +2203,12 @@ async function renderRooms() {
 }
 
 async function doReserveRoom(roomId) {
+  const button = getClickedButton();
   const room = DATA.rooms.find(r => r.id === roomId);
   const roomName = room ? room.name : 'Salle';
 
-  const eventOptions = DATA.events.filter(e => e.status !== 'Annulé' && e.status !== 'Terminé');
-  const defaultDate = new Date().toISOString().split('T')[0];
+  const eventOptions = DATA.events.filter(isUsableEvent);
+  const defaultDate = getTodayDateKey();
   const eventChoices = eventOptions.map(e =>
     `<option value="${e.id}">${e.name} (${formatDate(e.date)})</option>`
   ).join('');
@@ -2110,7 +2227,7 @@ async function doReserveRoom(roomId) {
         </div>
         <div>
           <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:6px">Date</label>
-          <input id="swal-room-date" type="date" class="swal2-input" value="${defaultDate}" style="margin:0;width:100%">
+          <input id="swal-room-date" type="date" class="swal2-input" min="${defaultDate}" value="${defaultDate}" style="margin:0;width:100%">
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
           <div>
@@ -2135,8 +2252,40 @@ async function doReserveRoom(roomId) {
         return false;
       }
 
+      if (!isValidDateKey(date) || !isValidTimeValue(startTime) || !isValidTimeValue(endTime)) {
+        Swal.showValidationMessage('La date ou les heures sont invalides.');
+        return false;
+      }
+
+      if (isPastDateTime(date, startTime)) {
+        Swal.showValidationMessage('Impossible de réserver une salle dans le passé.');
+        return false;
+      }
+
       if (endTime <= startTime) {
         Swal.showValidationMessage('L\'heure de fin doit être après l\'heure de début.');
+        return false;
+      }
+
+      const selectedEvent = eventId ? DATA.events.find(e => Number(e.id) === Number(eventId)) : null;
+      if (selectedEvent) {
+        if (!isUsableEvent(selectedEvent)) {
+          Swal.showValidationMessage('Cet événement est terminé, annulé ou déjà passé.');
+          return false;
+        }
+        if (selectedEvent.date && selectedEvent.date !== date) {
+          Swal.showValidationMessage('La réservation doit être à la même date que l’événement associé.');
+          return false;
+        }
+        if (room && Number(selectedEvent.guests || 0) > Number(room.capacity || 0)) {
+          Swal.showValidationMessage(`${roomName} ne peut accueillir que ${room.capacity || 0} invités.`);
+          return false;
+        }
+      }
+
+      const conflict = getReservationConflict(roomId, date, startTime, endTime);
+      if (conflict) {
+        Swal.showValidationMessage(`${conflict.roomName || roomName} est déjà réservée de ${conflict.startTime} à ${conflict.endTime}.`);
         return false;
       }
 
@@ -2152,21 +2301,33 @@ async function doReserveRoom(roomId) {
   if (!reservationData) return;
 
   try {
+    setActionBusy(button, true, 'Réservation...');
     const result = await reserveRoom({ roomId, ...reservationData });
     showToast(`${roomName} réservée! Coût: $${result.cost || 0}`, 'success');
     renderRooms();
   } catch (err) {
     showToast(err.message || 'Erreur de réservation', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
 async function confirmReservation(id) {
+  const button = getClickedButton();
+  const reservation = DATA.reservations.find(res => Number(res.id) === Number(id));
+  if (reservation && isPastDateTime(reservation.date, reservation.startTime || '00:00')) {
+    showToast('Impossible de confirmer une réservation déjà passée.', 'error');
+    return;
+  }
   try {
+    setActionBusy(button, true, 'Confirmation...');
     await updateReservation(id, { status: 'Confirmé' });
     showToast('Réservation confirmée!', 'success');
     renderRooms();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -2183,7 +2344,9 @@ async function renderGuests(filter = '') {
     DATA.events = eventData.events || [];
   } catch (e) { console.error('Guests fetch error:', e); }
 
-  document.getElementById('guests-tbody').innerHTML = DATA.guests.map(g => `
+  document.getElementById('guests-tbody').innerHTML = DATA.guests.map(g => {
+    const canInvite = isValidEmailAddress(g.email);
+    return `
     <tr>
       <td><strong>${g.fname} ${g.lname}</strong></td>
       <td>${g.email || ''}</td>
@@ -2191,27 +2354,37 @@ async function renderGuests(filter = '') {
       <td>${statusBadge(g.status)}</td>
       <td></td>
       <td>
-        <button class="btn btn-sm" onclick="doSendInvitation(${g.id})">✉️ Inviter</button>
+        <button class="btn btn-sm" ${canInvite ? `onclick="doSendInvitation(${g.id})"` : 'disabled title="Courriel invalide ou manquant"'}>✉️ Inviter</button>
         <button class="btn btn-sm btn-danger" onclick="removeGuest(${g.id})">🗑️</button>
       </td>
     </tr>
-  `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucun invité</td></tr>';
+  `;
+  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucun invité</td></tr>';
 
   // Guest event select
   const sel = document.getElementById('guest-event');
   sel.innerHTML = '<option value="">— Sélectionner —</option>' +
-    DATA.events.map(e => `<option value="${e.id}">${e.name}</option>`).join('');
+    DATA.events.filter(isUsableEvent).map(e => `<option value="${e.id}">${e.name}</option>`).join('');
 }
 
 function filterGuests(v) { renderGuests(v); }
 
 async function doSendInvitation(id) {
+  const button = getClickedButton();
+  const guest = DATA.guests.find(g => Number(g.id) === Number(id));
+  if (!guest || !isValidEmailAddress(guest.email)) {
+    showToast('Courriel invité invalide ou manquant.', 'error');
+    return;
+  }
   try {
+    setActionBusy(button, true, 'Envoi...');
     const result = await sendInvitation(id);
     showToast(result.message || 'Invitation envoyée!', 'success');
     renderGuests();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -2260,7 +2433,9 @@ async function renderServices() {
     DATA.services = data.services || [];
   } catch (e) { console.error('Services fetch error:', e); }
 
-  document.getElementById('services-tbody').innerHTML = DATA.services.map(s => `
+  document.getElementById('services-tbody').innerHTML = DATA.services.map(s => {
+    const lockedEvent = isLockedEvent({ status: s.eventStatus }) || (s.eventDate && isPastDateTime(s.eventDate, s.eventTime || '23:59'));
+    return `
     <tr>
       <td>${s.eventName || '-'}</td>
       <td>${s.name}</td>
@@ -2268,11 +2443,13 @@ async function renderServices() {
       <td>${statusBadge(s.status)}</td>
       <td style="color:var(--gold)">${money(s.cost)}</td>
       <td>
-        ${s.status === 'Demandé' || s.status === 'En attente' ? `<button class="btn btn-sm" onclick="validateService(${s.id})">✓ Valider</button>` : ''}
+        ${(s.status === 'Demandé' || s.status === 'En attente') && !lockedEvent ? `<button class="btn btn-sm" onclick="validateService(${s.id})">✓ Valider</button>` : ''}
+        ${(s.status === 'Demandé' || s.status === 'En attente') && lockedEvent ? '<span style="color:var(--text-muted);font-size:12px">Événement fermé</span>' : ''}
         ${s.status === 'Confirmé' ? '<span style="color:var(--success);font-size:12px">✓ Confirmé</span>' : ''}
       </td>
     </tr>
-  `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucun service</td></tr>';
+  `;
+  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucun service</td></tr>';
 
   document.getElementById('services-catalog-grid').innerHTML = DATA.servicesCatalog.map((s, idx) => `
     <div class="card" style="cursor:pointer" onclick="requestService(${idx})">
@@ -2286,15 +2463,23 @@ async function renderServices() {
 }
 
 async function validateService(id) {
+  const button = getClickedButton();
   try {
     const s = DATA.services.find(x => x.id === id);
     if (s) {
+      if (isLockedEvent({ status: s.eventStatus }) || (s.eventDate && isPastDateTime(s.eventDate, s.eventTime || '23:59'))) {
+        showToast('Impossible de valider un service lié à un événement fermé.', 'error');
+        return;
+      }
+      setActionBusy(button, true, 'Validation...');
       await updateService(id, { name: s.name, type: s.type, detail: s.detail, status: 'Confirmé', cost: s.cost, supplier: s.supplier, notes: s.notes });
       showToast('Service validé!', 'success');
       renderServices();
     }
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -2321,7 +2506,7 @@ async function requestService(catalogIndexOrName) {
     // Populate event dropdown with names
     const evtSel = document.getElementById('svc-event');
     evtSel.innerHTML = '<option value="">— Sélectionner un événement —</option>' +
-      DATA.events.map(e => `<option value="${e.id}">${e.name} (${formatDate(e.date)})</option>`).join('');
+      DATA.events.filter(isUsableEvent).map(e => `<option value="${e.id}">${e.name} (${formatDate(e.date)})</option>`).join('');
 
     // Reset form
     document.getElementById('svc-name').value = preSelectedName || '';
@@ -2351,20 +2536,25 @@ async function requestService(catalogIndexOrName) {
 }
 
 async function saveServiceRequest() {
+  const button = getClickedButton();
   const eventId = document.getElementById('svc-event').value;
   if (!eventId) { showToast('Veuillez sélectionner un événement.', 'error'); return; }
+  const selectedEvent = DATA.events.find(e => Number(e.id) === Number(eventId));
+  if (!isUsableEvent(selectedEvent)) { showToast('Impossible d’ajouter un service à cet événement.', 'error'); return; }
 
   let name = document.getElementById('svc-name').value;
-  if (name === '__custom') name = document.getElementById('svc-custom-name').value;
+  if (name === '__custom') name = document.getElementById('svc-custom-name').value.trim();
   if (!name) { showToast('Veuillez sélectionner ou saisir un service.', 'error'); return; }
 
-  const cost = parseFloat(document.getElementById('svc-cost').value) || 0;
+  const cost = Number(document.getElementById('svc-cost').value);
+  if (!Number.isFinite(cost)) { showToast('Veuillez saisir un coût valide.', 'error'); return; }
   if (cost <= 0) { showToast('Veuillez saisir un coût valide.', 'error'); return; }
 
   const detail = document.getElementById('svc-detail').value;
   const supplier = document.getElementById('svc-supplier').value;
 
   try {
+    setActionBusy(button, true, 'Ajout...');
     await createService({ name, type: name, eventId: parseInt(eventId), detail, cost, supplier });
     showToast(`Service "${name}" ajouté avec succès!`, 'success');
     closeModal('service-modal');
@@ -2398,6 +2588,8 @@ async function saveServiceRequest() {
     renderServices();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -2516,6 +2708,7 @@ async function viewInvoice(id) {
 }
 
 async function sendInvoiceToClient(id) {
+  const button = getClickedButton();
   const inv = DATA.invoices.find(i => i.id === id);
   if (!inv) return;
   const suggestedEmailMatch = String(inv.eventContact || inv.client || '').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
@@ -2529,23 +2722,45 @@ async function sendInvoiceToClient(id) {
         <input id="swal-invoice-email" class="swal2-input" style="margin:0;width:100%" placeholder="client@entreprise.com" value="${suggestedEmail}">
       </div>
     `,
-    preConfirm: () => document.getElementById('swal-invoice-email').value.trim()
+    preConfirm: () => {
+      const value = document.getElementById('swal-invoice-email').value.trim();
+      if (!isValidEmailAddress(value)) {
+        Swal.showValidationMessage('Veuillez saisir un courriel client valide.');
+        return false;
+      }
+      return value;
+    }
   });
   if (!email) return;
   try {
+    setActionBusy(button, true, 'Envoi...');
     const result = await sendInvoiceEmail(id, email);
     showToast(result.message || 'Facture envoyée.', 'success');
   } catch (err) {
     showToast(err.message || 'Impossible d\'envoyer la facture', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
 async function doPayInvoice(id) {
-  const method = await promptForm({
+  const button = getClickedButton();
+  const inv = DATA.invoices.find(i => Number(i.id) === Number(id));
+  if (!inv) return;
+  const paidAmount = DATA.payments
+    .filter(payment => Number(payment.invoiceId) === Number(id))
+    .reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  const remaining = Math.max(0, Math.round((Number(inv.total || 0) - paidAmount) * 100) / 100);
+  if (remaining <= 0 && inv.status === 'Payée') {
+    showToast('Cette facture est déjà payée.', 'info');
+    return;
+  }
+  const paymentData = await promptForm({
     title: 'Traiter le paiement',
     confirmText: 'Encaisser le paiement',
     html: `
-      <div style="text-align:left">
+      <div style="text-align:left;display:grid;gap:14px">
+        <div style="font-size:13px;color:var(--text-muted)">Solde restant: <strong style="color:var(--text)">${money(remaining)}</strong></div>
         <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:6px">Méthode de paiement</label>
         <select id="swal-payment-method" class="swal2-input" style="margin:0;width:100%">
           <option value="En ligne">En ligne</option>
@@ -2553,17 +2768,38 @@ async function doPayInvoice(id) {
           <option value="Virement">Virement</option>
           <option value="Chèque">Chèque</option>
         </select>
+        <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:6px">Montant encaissé</label>
+        <input id="swal-payment-amount" type="number" class="swal2-input" style="margin:0;width:100%" min="0" step="0.01" max="${remaining}" value="${remaining}">
       </div>
     `,
-    preConfirm: () => document.getElementById('swal-payment-method').value
+    preConfirm: () => {
+      const method = document.getElementById('swal-payment-method').value;
+      const amount = Number(document.getElementById('swal-payment-amount').value);
+      if (!Number.isFinite(amount) || amount < 0) {
+        Swal.showValidationMessage('Montant invalide.');
+        return false;
+      }
+      if (remaining > 0 && amount <= 0) {
+        Swal.showValidationMessage('Le paiement doit être supérieur à zéro.');
+        return false;
+      }
+      if (amount > remaining + 0.005) {
+        Swal.showValidationMessage('Le paiement dépasse le solde restant.');
+        return false;
+      }
+      return { method, amount };
+    }
   });
-  if (!method) return;
+  if (!paymentData) return;
   try {
-    const result = await payInvoice(id, method);
+    setActionBusy(button, true, 'Paiement...');
+    const result = await payInvoice(id, paymentData.method, paymentData.amount);
     showToast(result.message || 'Paiement traité!', 'success');
     renderBilling();
   } catch (err) {
     showToast(err.message || 'Erreur de paiement', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -2987,7 +3223,8 @@ function openEventModal() {
   document.getElementById('event-modal-title').textContent = 'Nouvel événement';
   document.getElementById('ev-name').value = '';
   document.getElementById('ev-type').value = 'Conférence';
-  document.getElementById('ev-date').value = new Date().toISOString().split('T')[0];
+  document.getElementById('ev-date').min = getTodayDateKey();
+  document.getElementById('ev-date').value = getTodayDateKey();
   document.getElementById('ev-time').value = '09:00';
   document.getElementById('ev-budget').value = '';
   document.getElementById('ev-guests').value = '';
@@ -2997,26 +3234,52 @@ function openEventModal() {
   openModal('event-modal');
 }
 
-async function saveEvent() {
-  const name = document.getElementById('ev-name').value;
-  if (!name) { showToast('Le nom est requis.', 'error'); return; }
+function buildEventPayload(status) {
+  const name = document.getElementById('ev-name').value.trim();
+  const date = document.getElementById('ev-date').value;
+  const time = document.getElementById('ev-time').value || '09:00';
+  const budgetRaw = document.getElementById('ev-budget').value;
+  const guestsRaw = document.getElementById('ev-guests').value;
+  const contact = document.getElementById('ev-contact').value.trim();
+  const budget = budgetRaw === '' ? 0 : Number(budgetRaw);
+  const guests = guestsRaw === '' ? 0 : Number(guestsRaw);
 
-  const eventData = {
+  if (!name) return { error: 'Le nom est requis.' };
+  if (status !== 'Brouillon' && !date) return { error: 'La date est requise.' };
+  if (date && !isValidDateKey(date)) return { error: 'La date est invalide.' };
+  if (time && !isValidTimeValue(time)) return { error: 'L’heure de début est invalide.' };
+  if (status !== 'Brouillon' && date && time && isPastDateTime(date, time)) {
+    return { error: 'Impossible de créer un événement dans le passé.' };
+  }
+  if (!Number.isFinite(budget) || budget < 0) return { error: 'Le budget doit être positif ou zéro.' };
+  if (!Number.isInteger(guests) || guests < 0) return { error: 'Le nombre d’invités doit être un entier positif ou zéro.' };
+  if (contact && !isValidEmailAddress(contact)) return { error: 'Le courriel de contact est invalide.' };
+
+  return { value: {
     name,
     type: document.getElementById('ev-type').value,
-    date: document.getElementById('ev-date').value,
-    time: document.getElementById('ev-time').value,
+    date,
+    time,
     duration: document.getElementById('ev-duration').value,
-    budget: parseFloat(document.getElementById('ev-budget').value) || 0,
-    guests: parseInt(document.getElementById('ev-guests').value) || 0,
+    budget,
+    guests,
     room: document.getElementById('ev-room').value,
     organizer: document.getElementById('ev-organizer').value,
-    contact: document.getElementById('ev-contact').value,
+    contact,
     description: document.getElementById('ev-desc').value,
-    status: 'Planifié',
-  };
+    status,
+  } };
+}
+
+async function saveEvent() {
+  const button = getClickedButton();
+  const built = buildEventPayload('Planifié');
+  if (built.error) { showToast(built.error, 'error'); return; }
+  const eventData = built.value;
+  const name = eventData.name;
 
   try {
+    setActionBusy(button, true, 'Enregistrement...');
     if (editingEventId) {
       await updateEvent(editingEventId, eventData);
       showToast('Événement modifié!', 'success');
@@ -3029,29 +3292,20 @@ async function saveEvent() {
     renderEvents();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
 async function saveEventDraft() {
-  const name = document.getElementById('ev-name').value;
-  if (!name) { showToast('Le nom est requis.', 'error'); return; }
-
-  const eventData = {
-    name,
-    type: document.getElementById('ev-type').value,
-    date: document.getElementById('ev-date').value,
-    time: document.getElementById('ev-time').value,
-    duration: document.getElementById('ev-duration').value,
-    budget: parseFloat(document.getElementById('ev-budget').value) || 0,
-    guests: parseInt(document.getElementById('ev-guests').value) || 0,
-    room: document.getElementById('ev-room').value,
-    organizer: document.getElementById('ev-organizer').value,
-    contact: document.getElementById('ev-contact').value,
-    description: document.getElementById('ev-desc').value,
-    status: 'Brouillon',
-  };
+  const button = getClickedButton();
+  const built = buildEventPayload('Brouillon');
+  if (built.error) { showToast(built.error, 'error'); return; }
+  const eventData = built.value;
+  const name = eventData.name;
 
   try {
+    setActionBusy(button, true, 'Sauvegarde...');
     if (editingEventId) {
       await updateEvent(editingEventId, eventData);
     } else {
@@ -3063,13 +3317,15 @@ async function saveEventDraft() {
     renderEvents();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
 function openGuestModal() {
   const sel = document.getElementById('guest-event');
   sel.innerHTML = '<option value="">— Sélectionner —</option>' +
-    DATA.events.map(e => `<option value="${e.id}">${e.name}</option>`).join('');
+    DATA.events.filter(isUsableEvent).map(e => `<option value="${e.id}">${e.name}</option>`).join('');
   document.getElementById('guest-fname').value = '';
   document.getElementById('guest-lname').value = '';
   document.getElementById('guest-email').value = '';
@@ -3079,16 +3335,27 @@ function openGuestModal() {
 }
 
 async function saveGuest() {
-  const fname = document.getElementById('guest-fname').value;
-  const lname = document.getElementById('guest-lname').value;
+  const button = getClickedButton();
+  const fname = document.getElementById('guest-fname').value.trim();
+  const lname = document.getElementById('guest-lname').value.trim();
+  const email = document.getElementById('guest-email').value.trim().toLowerCase();
+  const eventId = parseInt(document.getElementById('guest-event').value) || null;
   if (!fname || !lname) { showToast('Prénom et nom requis.', 'error'); return; }
+  if (!email || !isValidEmailAddress(email)) { showToast('Courriel valide requis.', 'error'); return; }
+  if (eventId) {
+    const selectedEvent = DATA.events.find(e => Number(e.id) === Number(eventId));
+    if (!isUsableEvent(selectedEvent)) { showToast('Impossible d’ajouter un invité à cet événement.', 'error'); return; }
+    const duplicate = DATA.guests.find(g => Number(g.eventId) === Number(eventId) && String(g.email || '').toLowerCase() === email);
+    if (duplicate) { showToast('Cet invité existe déjà pour cet événement.', 'error'); return; }
+  }
 
   try {
+    setActionBusy(button, true, 'Ajout...');
     await createGuest({
       fname, lname,
-      email: document.getElementById('guest-email').value,
+      email,
       phone: document.getElementById('guest-phone').value,
-      eventId: parseInt(document.getElementById('guest-event').value) || null,
+      eventId,
       status: document.getElementById('guest-status').value,
       vip: document.getElementById('guest-vip').value === '1',
       notes: document.getElementById('guest-notes').value,
@@ -3098,24 +3365,31 @@ async function saveGuest() {
     renderGuests();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
 function openUserModal() { openModal('user-modal'); }
 
 async function saveUser() {
-  const fname = document.getElementById('u-fname').value;
-  const lname = document.getElementById('u-lname').value;
+  const button = getClickedButton();
+  const fname = document.getElementById('u-fname').value.trim();
+  const lname = document.getElementById('u-lname').value.trim();
+  const email = document.getElementById('u-email').value.trim().toLowerCase();
   const password = document.getElementById('u-pass').value;
   if (!fname || !lname) { showToast('Prénom et nom requis.', 'error'); return; }
+  if (!email || !isValidEmailAddress(email)) { showToast('Courriel valide requis.', 'error'); return; }
   if (!password) { showToast('Mot de passe requis.', 'error'); return; }
+  if (password.length < 10) { showToast('Le mot de passe doit contenir au moins 10 caractères.', 'error'); return; }
 
   const roleMap = { 'Administrateur': 'admin', 'Organisateur': 'organisateur', 'Coordonnateur': 'coordonnateur', 'Comptabilité': 'compta' };
 
   try {
+    setActionBusy(button, true, 'Création...');
     await createUser({
       fname, lname,
-      email: document.getElementById('u-email').value,
+      email,
       password,
       role: roleMap[document.getElementById('u-role').value] || 'organisateur',
       phone: document.getElementById('u-phone') ? document.getElementById('u-phone').value : '',
@@ -3125,6 +3399,8 @@ async function saveUser() {
     renderUsers();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
+  } finally {
+    setActionBusy(button, false);
   }
 }
 
@@ -3209,7 +3485,8 @@ function statusBadge(status) {
   const map = {
     'Confirmé': 'badge-success', 'Planifié': 'badge-info', 'En cours': 'badge-gold',
     'Terminé': 'badge-muted', 'Annulé': 'badge-danger', 'Brouillon': 'badge-muted',
-    'En attente': 'badge-warning', 'Demandé': 'badge-info',
+    'En attente': 'badge-warning', 'Demandé': 'badge-info', 'Invité': 'badge-info',
+    'Décliné': 'badge-danger',
   };
   return `<span class="badge ${map[status] || 'badge-muted'}">${status || ''}</span>`;
 }

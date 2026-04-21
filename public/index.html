@@ -4485,7 +4485,7 @@ button {
       </div>
       <div class="form-row">
         <div class="form-group"><label>Heure de début</label><input type="time" id="ev-time" value="09:00"></div>
-        <div class="form-group"><label>Budget estimé (CAD)</label><input type="number" id="ev-budget" placeholder="5000"></div>
+        <div class="form-group"><label>Budget estimé (CAD)</label><input type="number" id="ev-budget" placeholder="5000" min="0" step="0.01"></div>
       </div>
       <div class="form-group"><label>Description</label><textarea id="ev-desc" rows="3" style="resize:vertical" placeholder="Décrivez l'événement..."></textarea></div>
       <div class="form-section-title">Salle & Services</div>
@@ -4495,7 +4495,7 @@ button {
       <div class="form-group"><label>Services requis</label>
         <div id="ev-services-check" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px"></div>
       </div>
-      <div class="form-group"><label>Nombre d'invités estimé</label><input type="number" id="ev-guests" placeholder="50"></div>
+      <div class="form-group"><label>Nombre d'invités estimé</label><input type="number" id="ev-guests" placeholder="50" min="0" step="1"></div>
       <div class="form-row">
         <div class="form-group"><label>Organisateur</label><input type="text" id="ev-organizer" placeholder="Nom du responsable"></div>
         <div class="form-group"><label>Contact</label><input type="email" id="ev-contact" placeholder="contact@email.com"></div>
@@ -4565,7 +4565,7 @@ button {
         </div>
         <div class="form-group"><label>Téléphone</label><input type="tel" id="u-phone"></div>
       </div>
-      <div class="form-group"><label>Mot de passe provisoire *</label><input type="password" id="u-pass" placeholder="••••••••"></div>
+      <div class="form-group"><label>Mot de passe provisoire *</label><input type="password" id="u-pass" minlength="10" placeholder="••••••••"></div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-sm" onclick="closeModal('user-modal')">Annuler</button>

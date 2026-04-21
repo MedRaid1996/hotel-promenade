@@ -547,6 +547,16 @@ async function notifyRole(role, title, body, type = 'info') {
 }
 
 const TAX_RATE = 0.14975; // TPS 5% + TVQ 9.975%
+const APP_TIME_ZONE = process.env.CONCIERGE_TIMEZONE || 'America/Toronto';
+
+const USER_ROLES = new Set(['admin', 'organisateur', 'coordonnateur', 'compta']);
+const USER_STATUSES = new Set(['Actif', 'Inactif']);
+const EVENT_STATUSES = new Set(['Planifié', 'Confirmé', 'En cours', 'Terminé', 'Annulé', 'Brouillon']);
+const RESERVATION_STATUSES = new Set(['En attente', 'Confirmé', 'Annulé']);
+const GUEST_STATUSES = new Set(['En attente', 'Invité', 'Confirmé', 'Décliné', 'Annulé']);
+const SERVICE_STATUSES = new Set(['Demandé', 'En attente', 'Confirmé', 'Terminé', 'Annulé']);
+const INVOICE_STATUSES = new Set(['En attente', 'Partiel', 'Payée', 'En retard', 'Brouillon', 'Annulée']);
+const PAYMENT_METHODS = new Set(['En ligne', 'Carte', 'Virement', 'Chèque', 'Espèces', 'Autre']);
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
@@ -557,6 +567,237 @@ function extractEmailCandidate(value) {
   if (!text) return null;
   const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
   return match ? match[0] : null;
+}
+
+function normalizeText(value) {
+  return String(value || '').trim();
+}
+
+function normalizeStatusAlias(status) {
+  const normalized = normalizeText(status)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  const aliases = {
+    annule: 'Annulé',
+    annulee: 'Annulée',
+    paye: 'Payée',
+    payee: 'Payée',
+    decline: 'Décliné',
+    decliner: 'Décliné',
+    invite: 'Invité',
+    confirme: 'Confirmé',
+    confirmee: 'Confirmé',
+    planifie: 'Planifié',
+    planifiee: 'Planifié',
+    termine: 'Terminé',
+    terminee: 'Terminé',
+    brouillon: 'Brouillon',
+    demande: 'Demandé',
+    demandee: 'Demandé',
+    partiel: 'Partiel',
+    'en attente': 'En attente',
+    'en cours': 'En cours',
+    'en retard': 'En retard'
+  };
+
+  return aliases[normalized] || normalizeText(status);
+}
+
+function cleanStatus(value, allowed, fallback) {
+  const status = normalizeStatusAlias(value || fallback);
+  return allowed.has(status) ? status : null;
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  if (value === '' || value === null || value === undefined) return fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toNonNegativeNumber(value, fallback = 0) {
+  const n = toFiniteNumber(value, fallback);
+  if (n === null || n < 0) return null;
+  return n;
+}
+
+function toNonNegativeInteger(value, fallback = 0) {
+  const n = toFiniteNumber(value, fallback);
+  if (n === null || n < 0 || !Number.isInteger(n)) return null;
+  return n;
+}
+
+function isValidDateString(date) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return false;
+  const [year, month, day] = String(date).split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
+}
+
+function isValidTimeString(time) {
+  const match = String(time || '').match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  return Boolean(match);
+}
+
+function timeToMinutes(time) {
+  if (!isValidTimeString(time)) return null;
+  const [hours, minutes] = String(time).split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+function getZonedNow() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: APP_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
+
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    time: `${values.hour === '24' ? '00' : values.hour}:${values.minute}`
+  };
+}
+
+function isPastDateTime(date, time = '00:00') {
+  if (!isValidDateString(date) || !isValidTimeString(time)) return false;
+  const now = getZonedNow();
+  if (date < now.date) return true;
+  if (date > now.date) return false;
+  return time <= now.time;
+}
+
+function eventIsLocked(event) {
+  const status = normalizeStatusAlias(event?.status);
+  return status === 'Annulé' || status === 'Terminé';
+}
+
+function validateEventInput(payload, options = {}) {
+  const status = cleanStatus(payload.status, EVENT_STATUSES, options.defaultStatus || 'Planifié');
+  if (!status) return { error: 'Statut d’événement invalide' };
+
+  const name = normalizeText(payload.name);
+  if (!name) return { error: 'Le nom de l’événement est requis' };
+
+  const date = normalizeText(payload.date);
+  const time = normalizeText(payload.time || '09:00');
+  const endTime = normalizeText(payload.endTime);
+  const isDraft = status === 'Brouillon';
+  const allowsHistoricalDate = isDraft || status === 'Annulé' || status === 'Terminé';
+
+  if (!isDraft && !date) return { error: 'La date de l’événement est requise' };
+  if (date && !isValidDateString(date)) return { error: 'La date de l’événement est invalide' };
+  if (time && !isValidTimeString(time)) return { error: 'L’heure de début est invalide' };
+  if (endTime && !isValidTimeString(endTime)) return { error: 'L’heure de fin est invalide' };
+  if (time && endTime && timeToMinutes(endTime) <= timeToMinutes(time)) {
+    return { error: 'L’heure de fin doit être après l’heure de début' };
+  }
+  if (!allowsHistoricalDate && date && time && isPastDateTime(date, time)) {
+    return { error: 'Impossible de planifier un événement dans le passé' };
+  }
+
+  const budget = toNonNegativeNumber(payload.budget, 0);
+  if (budget === null) return { error: 'Le budget doit être un montant positif ou zéro' };
+  const guests = toNonNegativeInteger(payload.guests, 0);
+  if (guests === null) return { error: 'Le nombre d’invités doit être un nombre entier positif ou zéro' };
+
+  const contact = normalizeText(payload.contact);
+  if (contact && !isValidEmail(contact)) return { error: 'Le courriel de contact est invalide' };
+
+  return {
+    value: {
+      name,
+      type: normalizeText(payload.type),
+      date: date || null,
+      time: time || null,
+      endTime: endTime || null,
+      duration: normalizeText(payload.duration),
+      status,
+      budget,
+      guests,
+      room: normalizeText(payload.room),
+      organizer: normalizeText(payload.organizer),
+      contact,
+      description: normalizeText(payload.description)
+    }
+  };
+}
+
+function validateReservationInput(payload) {
+  const roomId = toNonNegativeInteger(payload.roomId, null);
+  const eventId = payload.eventId ? toNonNegativeInteger(payload.eventId, null) : null;
+  const date = normalizeText(payload.date);
+  const startTime = normalizeText(payload.startTime);
+  const endTime = normalizeText(payload.endTime);
+
+  if (!roomId || !date || !startTime || !endTime) {
+    return { error: 'Salle, date, heure de début et heure de fin sont requises' };
+  }
+  if (!isValidDateString(date)) return { error: 'La date de réservation est invalide' };
+  if (!isValidTimeString(startTime) || !isValidTimeString(endTime)) return { error: 'Les heures de réservation sont invalides' };
+  if (timeToMinutes(endTime) <= timeToMinutes(startTime)) return { error: 'L’heure de fin doit être après l’heure de début' };
+  if (isPastDateTime(date, startTime)) return { error: 'Impossible de réserver une salle dans le passé' };
+
+  return { value: { roomId, eventId, date, startTime, endTime } };
+}
+
+function validateGuestInput(payload) {
+  const fname = normalizeText(payload.fname);
+  const lname = normalizeText(payload.lname);
+  const email = normalizeText(payload.email).toLowerCase();
+  const eventId = payload.eventId ? toNonNegativeInteger(payload.eventId, null) : null;
+  const status = cleanStatus(payload.status, GUEST_STATUSES, 'En attente');
+
+  if (!fname || !lname) return { error: 'Prénom et nom requis' };
+  if (email && !isValidEmail(email)) return { error: 'Le courriel de l’invité est invalide' };
+  if (payload.eventId && !eventId) return { error: 'Événement invalide' };
+  if (!status) return { error: 'Statut d’invité invalide' };
+
+  return {
+    value: {
+      fname,
+      lname,
+      email: email || null,
+      phone: normalizeText(payload.phone),
+      eventId,
+      status,
+      vip: payload.vip ? 1 : 0,
+      notes: normalizeText(payload.notes)
+    }
+  };
+}
+
+function validateServiceInput(payload) {
+  const name = normalizeText(payload.name);
+  const eventId = payload.eventId ? toNonNegativeInteger(payload.eventId, null) : null;
+  const status = cleanStatus(payload.status, SERVICE_STATUSES, 'Demandé');
+  const cost = toNonNegativeNumber(payload.cost, 0);
+
+  if (!name) return { error: 'Nom du service requis' };
+  if (payload.eventId && !eventId) return { error: 'Événement invalide' };
+  if (!status) return { error: 'Statut de service invalide' };
+  if (cost === null) return { error: 'Le coût du service doit être positif ou zéro' };
+
+  return {
+    value: {
+      name,
+      type: normalizeText(payload.type || name),
+      detail: normalizeText(payload.detail),
+      eventId,
+      status,
+      cost,
+      supplier: normalizeText(payload.supplier),
+      notes: normalizeText(payload.notes),
+      options: payload.options
+    }
+  };
 }
 
 function getMailTransporter() {
@@ -738,7 +979,8 @@ const conciergeTelegram = createTelegramConcierge({
 });
 
 const verifyToken = (req, res, next) => {
-  const token = req.headers.authorization.split(' ')[1];
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'No token provided' });
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
@@ -767,7 +1009,8 @@ function requireRole(...roles) {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
+    const cleanEmail = normalizeText(email).toLowerCase();
+    const user = await dbGet('SELECT * FROM users WHERE lower(email) = lower(?)', [cleanEmail]);
     if (!user) return res.status(401).json({ error: 'Utilisateur non trouvé' });
     if (user.status === 'Inactif') return res.status(401).json({ error: 'Compte désactivé' });
 
@@ -798,24 +1041,30 @@ app.post('/api/auth/register', async (req, res) => {
     if (!fname || !lname || !email || !password) {
       return res.status(400).json({ error: 'Tous les champs sont requis' });
     }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Courriel invalide' });
+    }
     if (password.length < 10) {
       return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 10 caractères' });
     }
     const hashedPassword = bcrypt.hashSync(password, 10);
     const role = 'organisateur';
+    const cleanEmail = normalizeText(email).toLowerCase();
+    const cleanFname = normalizeText(fname);
+    const cleanLname = normalizeText(lname);
     const result = await dbRun(
       'INSERT INTO users (fname, lname, email, password, role) VALUES (?,?,?,?,?)',
-      [fname, lname, email, hashedPassword, role]
+      [cleanFname, cleanLname, cleanEmail, hashedPassword, role]
     );
     const token = jwt.sign(
-      { id: result.lastID, email, role },
+      { id: result.lastID, email: cleanEmail, role },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
     await logAudit(result.lastID, 'REGISTER', 'users', result.lastID, 'Inscription');
     res.status(201).json({
       token,
-      user: { id: result.lastID, fname, lname, email, role }
+      user: { id: result.lastID, fname: cleanFname, lname: cleanLname, email: cleanEmail, role }
     });
   } catch (e) {
     res.status(400).json({ error: 'Courriel déjà utilisé ou erreur' });
@@ -871,17 +1120,18 @@ app.get('/api/events/:id', verifyToken, async (req, res) => {
 
 app.post('/api/events', verifyToken, async (req, res) => {
   try {
-    const { name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status } = req.body;
-    if (!name) return res.status(400).json({ error: 'Le nom est requis' });
+    const validation = validateEventInput(req.body, { defaultStatus: 'Planifié' });
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status } = validation.value;
     const result = await dbRun(
       `INSERT INTO events (name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status, userId)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [name, type, date, time, endTime, duration, budget || 0, guests || 0, room, organizer, contact, description, status || 'Planifié', req.userId]
+      [name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status, req.userId]
     );
     await logAudit(req.userId, 'CREATE', 'events', result.lastID, `Événement créé: ${name}`);
     await notifyRole('coordonnateur', 'Nouvel événement', `"${name}" a été créé.`, 'info');
     // Real-time: notify all clients about new event
-    emitRealtimeEvent('event:created', { id: result.lastID, name, type, date, status: status || 'Planifié', userId: req.userId });
+    emitRealtimeEvent('event:created', { id: result.lastID, name, type, date, status, userId: req.userId });
     res.status(201).json({ id: result.lastID, message: 'Événement créé' });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -890,13 +1140,16 @@ app.post('/api/events', verifyToken, async (req, res) => {
 
 app.put('/api/events/:id', verifyToken, async (req, res) => {
   try {
-    const { name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description } = req.body;
     const event = await dbGet('SELECT * FROM events WHERE id = ?', [req.params.id]);
     if (!event) return res.status(404).json({ error: 'Événement non trouvé' });
     // Allow owner or admin/coordonnateur
     if (event.userId !== req.userId && req.userRole !== 'admin' && req.userRole !== 'coordonnateur') {
       return res.status(403).json({ error: 'Accès refusé' });
     }
+    const merged = { ...event, ...req.body };
+    const validation = validateEventInput(merged, { defaultStatus: event.status || 'Planifié' });
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description } = validation.value;
     await dbRun(
       `UPDATE events SET name=?, type=?, date=?, time=?, endTime=?, duration=?, status=?, budget=?, guests=?, room=?, organizer=?, contact=?, description=? WHERE id=?`,
       [name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description, req.params.id]
@@ -1058,9 +1311,28 @@ app.get('/api/reservations', verifyToken, async (req, res) => {
 
 app.post('/api/rooms/reserve', verifyToken, async (req, res) => {
   try {
-    const { roomId, eventId, date, startTime, endTime } = req.body;
-    if (!roomId || !date || !startTime || !endTime) {
-      return res.status(400).json({ error: 'Tous les champs sont requis' });
+    const validation = validateReservationInput(req.body);
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { roomId, eventId, date, startTime, endTime } = validation.value;
+
+    const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [roomId]);
+    if (!room) return res.status(404).json({ error: 'Salle non trouvée' });
+    if (room.available === 0) return res.status(400).json({ error: 'Cette salle est en maintenance et ne peut pas être réservée' });
+
+    let ownerId = req.userId;
+    if (eventId) {
+      const event = await requireEventAccess(req, res, eventId);
+      if (!event) return;
+      if (eventIsLocked(event)) {
+        return res.status(400).json({ error: 'Impossible de réserver une salle pour un événement annulé ou terminé' });
+      }
+      if (event.date && event.date !== date) {
+        return res.status(400).json({ error: 'La réservation doit être à la même date que l’événement associé' });
+      }
+      if (Number(event.guests || 0) > Number(room.capacity || 0)) {
+        return res.status(400).json({ error: `Capacité insuffisante: ${room.name} accepte ${room.capacity || 0} invités, l’événement en prévoit ${event.guests}` });
+      }
+      ownerId = event.userId;
     }
 
     // Conflict check
@@ -1075,15 +1347,6 @@ app.post('/api/rooms/reserve', verifyToken, async (req, res) => {
       return res.status(409).json({
         error: `Conflit de réservation: ${conflict.roomName} est déjà réservée le ${date} de ${conflict.startTime} à ${conflict.endTime}`
       });
-    }
-
-    const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [roomId]);
-    if (!room) return res.status(404).json({ error: 'Salle non trouvée' });
-    let ownerId = req.userId;
-    if (eventId) {
-      const event = await requireEventAccess(req, res, eventId);
-      if (!event) return;
-      ownerId = event.userId;
     }
 
     // Calculate cost
@@ -1111,7 +1374,8 @@ app.post('/api/rooms/reserve', verifyToken, async (req, res) => {
 
 app.put('/api/reservations/:id', verifyToken, async (req, res) => {
   try {
-    const { status } = req.body;
+    const status = cleanStatus(req.body.status, RESERVATION_STATUSES, 'En attente');
+    if (!status) return res.status(400).json({ error: 'Statut de réservation invalide' });
     const reservation = await dbGet(`
       SELECT r.*, e.userId as eventOwnerId
       FROM reservations r
@@ -1121,6 +1385,9 @@ app.put('/api/reservations/:id', verifyToken, async (req, res) => {
     if (!reservation) return res.status(404).json({ error: 'Réservation non trouvée' });
     if (!isOperationalRole(req.userRole) && reservation.userId !== req.userId && reservation.eventOwnerId !== req.userId) {
       return res.status(403).json({ error: 'Accès refusé' });
+    }
+    if (status === 'Confirmé' && isPastDateTime(reservation.date, reservation.startTime)) {
+      return res.status(400).json({ error: 'Impossible de confirmer une réservation déjà passée' });
     }
     await dbRun('UPDATE reservations SET status = ? WHERE id = ?', [status, req.params.id]);
     await logAudit(req.userId, 'UPDATE', 'reservations', req.params.id, `Statut: ${status}`);
@@ -1163,17 +1430,25 @@ app.get('/api/guests', verifyToken, async (req, res) => {
 
 app.post('/api/guests', verifyToken, async (req, res) => {
   try {
-    const { fname, lname, email, phone, eventId, status, vip, notes } = req.body;
-    if (!fname || !lname) return res.status(400).json({ error: 'Prénom et nom requis' });
+    const validation = validateGuestInput(req.body);
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { fname, lname, email, phone, eventId, status, vip, notes } = validation.value;
     let ownerId = req.userId;
     if (eventId) {
       const event = await requireEventAccess(req, res, eventId);
       if (!event) return;
+      if (eventIsLocked(event)) {
+        return res.status(400).json({ error: 'Impossible d’ajouter un invité à un événement annulé ou terminé' });
+      }
       ownerId = event.userId;
+    }
+    if (email && eventId) {
+      const duplicate = await dbGet('SELECT id FROM guests WHERE eventId = ? AND lower(email) = lower(?)', [eventId, email]);
+      if (duplicate) return res.status(409).json({ error: 'Cet invité existe déjà pour cet événement' });
     }
     const result = await dbRun(
       'INSERT INTO guests (fname, lname, email, phone, eventId, userId, status, vip, notes) VALUES (?,?,?,?,?,?,?,?,?)',
-      [fname, lname, email, phone, eventId, ownerId, status || 'En attente', vip ? 1 : 0, notes]
+      [fname, lname, email, phone, eventId, ownerId, status, vip, notes]
     );
     await logAudit(req.userId, 'CREATE', 'guests', result.lastID, `Invité: ${fname} ${lname}`);
     res.status(201).json({ id: result.lastID, message: 'Invité ajouté' });
@@ -1184,7 +1459,6 @@ app.post('/api/guests', verifyToken, async (req, res) => {
 
 app.put('/api/guests/:id', verifyToken, async (req, res) => {
   try {
-    const { fname, lname, email, phone, eventId, status, vip, notes } = req.body;
     const guest = await dbGet(`
       SELECT g.*, e.userId as eventOwnerId
       FROM guests g LEFT JOIN events e ON g.eventId = e.id
@@ -1194,15 +1468,22 @@ app.put('/api/guests/:id', verifyToken, async (req, res) => {
     if (!isOperationalRole(req.userRole) && guest.userId !== req.userId && guest.eventOwnerId !== req.userId) {
       return res.status(403).json({ error: 'Accès refusé' });
     }
+    const validation = validateGuestInput({ ...guest, ...req.body });
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { fname, lname, email, phone, eventId, status, vip, notes } = validation.value;
     let ownerId = guest.userId || req.userId;
     if (eventId) {
       const event = await requireEventAccess(req, res, eventId);
       if (!event) return;
       ownerId = event.userId;
     }
+    if (email && eventId) {
+      const duplicate = await dbGet('SELECT id FROM guests WHERE eventId = ? AND lower(email) = lower(?) AND id != ?', [eventId, email, req.params.id]);
+      if (duplicate) return res.status(409).json({ error: 'Cet invité existe déjà pour cet événement' });
+    }
     await dbRun(
       'UPDATE guests SET fname=?, lname=?, email=?, phone=?, eventId=?, userId=?, status=?, vip=?, notes=? WHERE id=?',
-      [fname, lname, email, phone, eventId, ownerId, status, vip ? 1 : 0, notes, req.params.id]
+      [fname, lname, email, phone, eventId, ownerId, status, vip, notes, req.params.id]
     );
     await logAudit(req.userId, 'UPDATE', 'guests', req.params.id, `Invité modifié: ${fname} ${lname}`);
     res.json({ message: 'Invité modifié' });
@@ -1240,6 +1521,7 @@ app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, r
 
     const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
     let imported = 0;
+    let skipped = 0;
     const eventId = req.body.eventId || null;
     let ownerId = req.userId;
     if (eventId) {
@@ -1247,6 +1529,10 @@ app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, r
       if (!event) {
         fs.unlinkSync(req.file.path);
         return;
+      }
+      if (eventIsLocked(event)) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: 'Impossible d’importer des invités dans un événement annulé ou terminé' });
       }
       ownerId = event.userId;
     }
@@ -1261,19 +1547,28 @@ app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, r
       const email = row['email'] || row['courriel'] || values[2] || '';
       const phone = row['telephone'] || row['phone'] || row['téléphone'] || values[3] || '';
 
-      if (fname && lname) {
+      if (fname && lname && (!email || isValidEmail(email))) {
+        if (email && eventId) {
+          const duplicate = await dbGet('SELECT id FROM guests WHERE eventId = ? AND lower(email) = lower(?)', [eventId, email]);
+          if (duplicate) {
+            skipped++;
+            continue;
+          }
+        }
         await dbRun(
           'INSERT INTO guests (fname, lname, email, phone, eventId, userId) VALUES (?,?,?,?,?,?)',
           [fname, lname, email, phone, eventId, ownerId]
         );
         imported++;
+      } else {
+        skipped++;
       }
     }
 
     // Clean up uploaded file
     fs.unlinkSync(req.file.path);
     await logAudit(req.userId, 'IMPORT', 'guests', null, `${imported} invités importés`);
-    res.json({ message: `${imported} invités importés avec succès` });
+    res.json({ message: `${imported} invités importés avec succès${skipped ? `, ${skipped} ligne(s) ignorée(s)` : ''}` });
   } catch (e) {
     res.status(500).json({ error: 'Erreur d\'importation: ' + e.message });
   }
@@ -1314,8 +1609,12 @@ app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
     const guest = await dbGet('SELECT g.*, e.name as eventName, e.date, e.time, e.userId as eventOwnerId FROM guests g LEFT JOIN events e ON g.eventId = e.id WHERE g.id = ?', [req.params.id]);
     if (!guest) return res.status(404).json({ error: 'Invité non trouvé' });
     if (!guest.email) return res.status(400).json({ error: 'Pas de courriel pour cet invité' });
+    if (!isValidEmail(guest.email)) return res.status(400).json({ error: 'Le courriel de cet invité est invalide' });
     if (!isOperationalRole(req.userRole) && guest.userId !== req.userId && guest.eventOwnerId !== req.userId) {
       return res.status(403).json({ error: 'Accès refusé' });
+    }
+    if (guest.date && guest.time && isPastDateTime(guest.date, guest.time)) {
+      return res.status(400).json({ error: 'Impossible d’envoyer une invitation pour un événement déjà passé' });
     }
 
     // Mock email — in production, use nodemailer
@@ -1336,7 +1635,7 @@ app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
 app.get('/api/services', verifyToken, async (req, res) => {
   try {
     const { eventId } = req.query;
-    let sql = 'SELECT s.*, e.name as eventName FROM services s LEFT JOIN events e ON s.eventId = e.id';
+    let sql = 'SELECT s.*, e.name as eventName, e.date as eventDate, e.time as eventTime, e.status as eventStatus FROM services s LEFT JOIN events e ON s.eventId = e.id';
     const params = [];
     const filters = [];
     if (!isOperationalRole(req.userRole)) {
@@ -1355,17 +1654,24 @@ app.get('/api/services', verifyToken, async (req, res) => {
 
 app.post('/api/services', verifyToken, async (req, res) => {
   try {
-    const { name, type, detail, eventId, cost, supplier, notes, options } = req.body;
-    if (!name) return res.status(400).json({ error: 'Nom du service requis' });
+    const validation = validateServiceInput(req.body);
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, detail, eventId, cost, supplier, notes, options } = validation.value;
     let ownerId = req.userId;
     if (eventId) {
       const event = await requireEventAccess(req, res, eventId);
       if (!event) return;
+      if (eventIsLocked(event)) {
+        return res.status(400).json({ error: 'Impossible d’ajouter un service à un événement annulé ou terminé' });
+      }
+      if (event.date && event.time && isPastDateTime(event.date, event.time)) {
+        return res.status(400).json({ error: 'Impossible d’ajouter un service à un événement déjà passé' });
+      }
       ownerId = event.userId;
     }
     const result = await dbRun(
       'INSERT INTO services (name, type, detail, eventId, userId, cost, supplier, notes, options) VALUES (?,?,?,?,?,?,?,?,?)',
-      [name, type, detail, eventId, ownerId, cost || 0, supplier, notes, typeof options === 'string' ? options : JSON.stringify(options)]
+      [name, type, detail, eventId, ownerId, cost, supplier, notes, typeof options === 'string' ? options : JSON.stringify(options)]
     );
     await logAudit(req.userId, 'CREATE', 'services', result.lastID, `Service: ${name}`);
     await notifyRole('coordonnateur', 'Demande de service', `Service "${name}" demandé.`, 'info');
@@ -1399,9 +1705,8 @@ app.post('/api/services', verifyToken, async (req, res) => {
 
 app.put('/api/services/:id', verifyToken, async (req, res) => {
   try {
-    const { name, type, detail, status, cost, supplier, notes, options } = req.body;
     const existingService = await dbGet(`
-      SELECT s.*, e.userId as eventOwnerId
+      SELECT s.*, e.userId as eventOwnerId, e.status as eventStatus, e.date as eventDate, e.time as eventTime
       FROM services s LEFT JOIN events e ON s.eventId = e.id
       WHERE s.id = ?
     `, [req.params.id]);
@@ -1409,6 +1714,12 @@ app.put('/api/services/:id', verifyToken, async (req, res) => {
     if (!isOperationalRole(req.userRole) && existingService.userId !== req.userId && existingService.eventOwnerId !== req.userId) {
       return res.status(403).json({ error: 'Accès refusé' });
     }
+    if (eventIsLocked({ status: existingService.eventStatus })) {
+      return res.status(400).json({ error: 'Impossible de modifier un service lié à un événement annulé ou terminé' });
+    }
+    const validation = validateServiceInput({ ...existingService, ...req.body, eventId: existingService.eventId });
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, detail, status, cost, supplier, notes, options } = validation.value;
     await dbRun(
       'UPDATE services SET name=?, type=?, detail=?, status=?, cost=?, supplier=?, notes=?, options=? WHERE id=?',
       [name, type, detail, status, cost, supplier, notes, typeof options === 'string' ? options : JSON.stringify(options), req.params.id]
@@ -1550,23 +1861,40 @@ app.post('/api/invoices/generate/:eventId', verifyToken, async (req, res) => {
 
 app.post('/api/invoices', verifyToken, async (req, res) => {
   try {
-    const { number, eventId, client, amount, issueDate, dueDate, notes } = req.body;
+    const { number, client, amount, issueDate, dueDate, notes } = req.body;
+    const eventId = req.body.eventId ? toNonNegativeInteger(req.body.eventId, null) : null;
+    const invoiceNumber = normalizeText(number);
+    const invoiceClient = normalizeText(client);
+    const invoiceAmount = toNonNegativeNumber(amount, null);
+    const cleanIssueDate = normalizeText(issueDate);
+    const cleanDueDate = normalizeText(dueDate);
+
+    if (!invoiceNumber) return res.status(400).json({ error: 'Le numéro de facture est requis' });
+    if (!invoiceClient) return res.status(400).json({ error: 'Le client de la facture est requis' });
+    if (req.body.eventId && !eventId) return res.status(400).json({ error: 'Événement invalide' });
+    if (invoiceAmount === null || invoiceAmount <= 0) return res.status(400).json({ error: 'Le montant de la facture doit être supérieur à zéro' });
+    if (cleanIssueDate && !isValidDateString(cleanIssueDate)) return res.status(400).json({ error: 'La date d’émission est invalide' });
+    if (cleanDueDate && !isValidDateString(cleanDueDate)) return res.status(400).json({ error: 'La date d’échéance est invalide' });
+    if (cleanIssueDate && cleanDueDate && cleanDueDate < cleanIssueDate) {
+      return res.status(400).json({ error: 'La date d’échéance doit être après la date d’émission' });
+    }
+
     let ownerId = req.userId;
     if (eventId) {
       const event = await requireEventAccess(req, res, eventId, { allowFinance: true });
       if (!event) return;
       ownerId = event.userId;
     }
-    const taxes = Math.round((amount || 0) * TAX_RATE * 100) / 100;
-    const total = Math.round(((amount || 0) + taxes) * 100) / 100;
+    const taxes = Math.round(invoiceAmount * TAX_RATE * 100) / 100;
+    const total = Math.round((invoiceAmount + taxes) * 100) / 100;
     const result = await dbRun(
       'INSERT INTO invoices (number, eventId, userId, client, amount, taxes, total, issueDate, dueDate, notes) VALUES (?,?,?,?,?,?,?,?,?,?)',
-      [number, eventId, ownerId, client, amount, taxes, total, issueDate, dueDate, notes]
+      [invoiceNumber, eventId, ownerId, invoiceClient, invoiceAmount, taxes, total, cleanIssueDate || null, cleanDueDate || null, normalizeText(notes)]
     );
-    await logAudit(req.userId, 'CREATE', 'invoices', result.lastID, `Facture ${number}`);
+    await logAudit(req.userId, 'CREATE', 'invoices', result.lastID, `Facture ${invoiceNumber}`);
     res.status(201).json({ id: result.lastID, message: 'Facture créée' });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(400).json({ error: e.message && e.message.includes('UNIQUE') ? 'Numéro de facture déjà utilisé' : 'Erreur serveur' });
   }
 });
 
@@ -1582,15 +1910,18 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
     if (!isFinanceRole(req.userRole) && inv.userId !== req.userId && inv.eventOwnerId !== req.userId) {
       return res.status(403).json({ error: 'Accès refusé' });
     }
-    const normalizedStatus = String(status || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const cleanInvoiceStatus = cleanStatus(status, INVOICE_STATUSES, inv.status || 'En attente');
+    if (!cleanInvoiceStatus) return res.status(400).json({ error: 'Statut de facture invalide' });
+    const invoiceClient = client === undefined ? inv.client : normalizeText(client);
+    const normalizedStatus = String(cleanInvoiceStatus || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     const paidDate = normalizedStatus === 'payee' || normalizedStatus === 'paye'
       ? new Date().toISOString().split('T')[0]
       : null;
     await dbRun(
       'UPDATE invoices SET status=?, notes=?, client=?, paidDate=COALESCE(?, paidDate) WHERE id=?',
-      [status, notes, client, paidDate, req.params.id]
+      [cleanInvoiceStatus, normalizeText(notes), invoiceClient, paidDate, req.params.id]
     );
-    await logAudit(req.userId, 'UPDATE', 'invoices', req.params.id, `Statut: ${status}`);
+    await logAudit(req.userId, 'UPDATE', 'invoices', req.params.id, `Statut: ${cleanInvoiceStatus}`);
     res.json({ message: 'Facture modifiée' });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -1731,20 +2062,40 @@ app.post('/api/invoices/:id/pay', verifyToken, async (req, res) => {
     }
 
     const { method, amount } = req.body;
-    const payAmount = amount || inv.total;
+    const cleanMethod = normalizeText(method || 'En ligne');
+    if (!PAYMENT_METHODS.has(cleanMethod)) {
+      return res.status(400).json({ error: 'Méthode de paiement invalide' });
+    }
+    const previousPayments = await dbGet(
+      "SELECT COALESCE(SUM(amount), 0) as paid FROM payments WHERE invoiceId = ? AND status = 'Complété'",
+      [req.params.id]
+    );
+    const alreadyPaid = Number(previousPayments?.paid || 0);
+    const remaining = Math.max(0, Math.round((Number(inv.total || 0) - alreadyPaid) * 100) / 100);
+    const payAmount = amount === undefined || amount === null || amount === ''
+      ? remaining
+      : toNonNegativeNumber(amount, null);
+
+    if (payAmount === null) return res.status(400).json({ error: 'Montant de paiement invalide' });
+    if (remaining > 0 && payAmount <= 0) return res.status(400).json({ error: 'Le paiement doit être supérieur à zéro' });
+    if (payAmount > remaining + 0.005) {
+      return res.status(400).json({ error: `Le paiement dépasse le solde restant (${remaining.toFixed(2)}$)` });
+    }
+
     const paidDate = new Date().toISOString().split('T')[0];
 
     // Create payment
     await dbRun(
       'INSERT INTO payments (invoiceId, amount, status, date, method) VALUES (?,?,?,?,?)',
-      [req.params.id, payAmount, 'Complété', paidDate, method || 'En ligne']
+      [req.params.id, payAmount, 'Complété', paidDate, cleanMethod]
     );
 
     // Update invoice status
-    const newStatus = payAmount >= inv.total ? 'Payée' : 'Partiel';
-    await dbRun('UPDATE invoices SET status=?, paidDate=? WHERE id=?', [newStatus, paidDate, req.params.id]);
+    const totalPaid = Math.round((alreadyPaid + payAmount) * 100) / 100;
+    const newStatus = totalPaid >= Number(inv.total || 0) ? 'Payée' : 'Partiel';
+    await dbRun('UPDATE invoices SET status=?, paidDate=? WHERE id=?', [newStatus, newStatus === 'Payée' ? paidDate : null, req.params.id]);
 
-    await logAudit(req.userId, 'PAY', 'invoices', req.params.id, `Paiement $${payAmount} — ${method || 'En ligne'}`);
+    await logAudit(req.userId, 'PAY', 'invoices', req.params.id, `Paiement $${payAmount} — ${cleanMethod}`);
     await createNotification(req.userId, 'Paiement effectué', `Facture ${inv.number}: $${payAmount} payé`, 'success');
     await notifyRole('compta', 'Paiement reçu', `Facture ${inv.number}: $${payAmount}`, 'success');
 
@@ -1895,13 +2246,20 @@ app.get('/api/users', verifyToken, requireRole('admin'), async (req, res) => {
 app.post('/api/users', verifyToken, requireRole('admin'), async (req, res) => {
   try {
     const { fname, lname, email, password, role, phone } = req.body;
-    if (!fname || !lname || !email || !password) return res.status(400).json({ error: 'Tous les champs requis' });
+    const cleanFname = normalizeText(fname);
+    const cleanLname = normalizeText(lname);
+    const cleanEmail = normalizeText(email).toLowerCase();
+    const cleanRole = cleanStatus(role, USER_ROLES, 'organisateur');
+    if (!cleanFname || !cleanLname || !cleanEmail || !password) return res.status(400).json({ error: 'Tous les champs requis' });
+    if (!isValidEmail(cleanEmail)) return res.status(400).json({ error: 'Courriel invalide' });
+    if (String(password).length < 10) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 10 caractères' });
+    if (!cleanRole) return res.status(400).json({ error: 'Rôle invalide' });
     const hp = bcrypt.hashSync(password, 10);
     const result = await dbRun(
       'INSERT INTO users (fname, lname, email, password, role, phone) VALUES (?,?,?,?,?,?)',
-      [fname, lname, email, hp, role || 'organisateur', phone]
+      [cleanFname, cleanLname, cleanEmail, hp, cleanRole, normalizeText(phone)]
     );
-    await logAudit(req.userId, 'CREATE', 'users', result.lastID, `Utilisateur créé: ${fname} ${lname} (${role})`);
+    await logAudit(req.userId, 'CREATE', 'users', result.lastID, `Utilisateur créé: ${cleanFname} ${cleanLname} (${cleanRole})`);
     res.status(201).json({ id: result.lastID, message: 'Utilisateur créé' });
   } catch (e) {
     res.status(400).json({ error: 'Courriel déjà utilisé' });
@@ -1911,9 +2269,20 @@ app.post('/api/users', verifyToken, requireRole('admin'), async (req, res) => {
 app.put('/api/users/:id', verifyToken, requireRole('admin'), async (req, res) => {
   try {
     const { fname, lname, email, role, status, phone } = req.body;
+    const existing = await dbGet('SELECT * FROM users WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Utilisateur non trouvé' });
+    const cleanFname = normalizeText(fname || existing.fname);
+    const cleanLname = normalizeText(lname || existing.lname);
+    const cleanEmail = normalizeText(email || existing.email).toLowerCase();
+    const cleanRole = cleanStatus(role, USER_ROLES, existing.role || 'organisateur');
+    const cleanUserStatus = cleanStatus(status, USER_STATUSES, existing.status || 'Actif');
+    if (!cleanFname || !cleanLname || !cleanEmail) return res.status(400).json({ error: 'Prénom, nom et courriel requis' });
+    if (!isValidEmail(cleanEmail)) return res.status(400).json({ error: 'Courriel invalide' });
+    if (!cleanRole) return res.status(400).json({ error: 'Rôle invalide' });
+    if (!cleanUserStatus) return res.status(400).json({ error: 'Statut utilisateur invalide' });
     await dbRun(
       'UPDATE users SET fname=?, lname=?, email=?, role=?, status=?, phone=? WHERE id=?',
-      [fname, lname, email, role, status, phone, req.params.id]
+      [cleanFname, cleanLname, cleanEmail, cleanRole, cleanUserStatus, normalizeText(phone), req.params.id]
     );
     await logAudit(req.userId, 'UPDATE', 'users', req.params.id, `Utilisateur modifié`);
     res.json({ message: 'Utilisateur modifié' });
@@ -2339,11 +2708,13 @@ async function executeChatTool(toolName, args, userId, userRole) {
   switch (toolName) {
 
     case 'create_event': {
-      const { name, type, date, time, endTime, budget, guests, description, status } = args;
+      const validation = validateEventInput(args, { defaultStatus: 'Planifié' });
+      if (validation.error) return { success: false, error: validation.error };
+      const { name, type, date, time, endTime, budget, guests, description, status } = validation.value;
       const result = await dbRun(
         `INSERT INTO events (name, type, date, time, endTime, budget, guests, description, status, userId)
          VALUES (?,?,?,?,?,?,?,?,?,?)`,
-        [name, type || null, date || null, time || null, endTime || null, toFloat(budget), toInt(guests) || 0, description || null, status || 'Planifié', userId]
+        [name, type || null, date || null, time || null, endTime || null, budget, guests, description || null, status, userId]
       );
       await logAudit(userId, 'CREATE', 'events', result.lastID, `Événement créé via IA: ${name}`);
       await notifyRole('coordonnateur', 'Nouvel événement', `"${name}" a été créé via le concierge IA.`, 'info');
@@ -2372,11 +2743,21 @@ async function executeChatTool(toolName, args, userId, userRole) {
     }
 
     case 'reserve_room': {
-      const roomId = toInt(args.roomId);
-      const eventId = toInt(args.eventId);
-      const { date, startTime, endTime } = args;
-      if (!roomId || !date || !startTime || !endTime) {
-        return { success: false, error: 'Paramètres manquants: roomId, date, startTime, endTime requis' };
+      const validation = validateReservationInput(args);
+      if (validation.error) return { success: false, error: validation.error };
+      const { roomId, eventId, date, startTime, endTime } = validation.value;
+      const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [roomId]);
+      if (!room) return { success: false, error: 'Salle non trouvée avec ID ' + roomId };
+      if (room.available === 0) return { success: false, error: 'Cette salle est en maintenance et ne peut pas être réservée' };
+      if (eventId) {
+        const event = await getEventOrNull(eventId);
+        if (!event) return { success: false, error: 'Événement non trouvé' };
+        if (!canAccessEvent({ userId, userRole }, event)) return { success: false, error: 'Accès refusé' };
+        if (eventIsLocked(event)) return { success: false, error: 'Impossible de réserver une salle pour un événement annulé ou terminé' };
+        if (event.date && event.date !== date) return { success: false, error: 'La réservation doit être à la même date que l’événement associé' };
+        if (Number(event.guests || 0) > Number(room.capacity || 0)) {
+          return { success: false, error: `Capacité insuffisante: ${room.name} accepte ${room.capacity || 0} invités, l’événement en prévoit ${event.guests}` };
+        }
       }
       // Conflict check
       const conflict = await dbGet(`
@@ -2388,8 +2769,6 @@ async function executeChatTool(toolName, args, userId, userRole) {
       if (conflict) {
         return { success: false, error: `Conflit: ${conflict.roomName} est déjà réservée le ${date} de ${conflict.startTime} à ${conflict.endTime}` };
       }
-      const room = await dbGet('SELECT * FROM rooms WHERE id = ?', [roomId]);
-      if (!room) return { success: false, error: 'Salle non trouvée avec ID ' + roomId };
       const startH = parseInt(startTime.split(':')[0]) + parseInt(startTime.split(':')[1]) / 60;
       const endH = parseInt(endTime.split(':')[0]) + parseInt(endTime.split(':')[1]) / 60;
       const hours = Math.max(endH - startH, 1);
@@ -2404,9 +2783,20 @@ async function executeChatTool(toolName, args, userId, userRole) {
     }
 
     case 'add_guest': {
-      const { fname, lname, email, phone, notes } = args;
-      const eventId = toInt(args.eventId);
+      const validation = validateGuestInput(args);
+      if (validation.error) return { success: false, error: validation.error };
+      const { fname, lname, email, phone, eventId, notes } = validation.value;
       const vip = args.vip === true || args.vip === 'true' || args.vip === '1' ? 1 : 0;
+      if (eventId) {
+        const event = await getEventOrNull(eventId);
+        if (!event) return { success: false, error: 'Événement non trouvé' };
+        if (!canAccessEvent({ userId, userRole }, event)) return { success: false, error: 'Accès refusé' };
+        if (eventIsLocked(event)) return { success: false, error: 'Impossible d’ajouter un invité à un événement annulé ou terminé' };
+        if (email) {
+          const duplicate = await dbGet('SELECT id FROM guests WHERE eventId = ? AND lower(email) = lower(?)', [eventId, email]);
+          if (duplicate) return { success: false, error: 'Cet invité existe déjà pour cet événement' };
+        }
+      }
       const result = await dbRun(
         'INSERT INTO guests (fname, lname, email, phone, eventId, userId, status, vip, notes) VALUES (?,?,?,?,?,?,?,?,?)',
         [fname, lname, email || null, phone || null, eventId, userId, 'En attente', vip, notes || null]
@@ -2429,10 +2819,17 @@ async function executeChatTool(toolName, args, userId, userRole) {
     }
 
     case 'request_service': {
-      const { name, type, supplier, notes } = args;
-      const eventId = toInt(args.eventId);
-      const cost = toFloat(args.cost);
+      const validation = validateServiceInput(args);
+      if (validation.error) return { success: false, error: validation.error };
+      const { name, type, eventId, cost, supplier, notes } = validation.value;
       if (!eventId) return { success: false, error: "ID de l'événement requis" };
+      const event = await getEventOrNull(eventId);
+      if (!event) return { success: false, error: 'Événement non trouvé' };
+      if (!canAccessEvent({ userId, userRole }, event)) return { success: false, error: 'Accès refusé' };
+      if (eventIsLocked(event)) return { success: false, error: 'Impossible d’ajouter un service à un événement annulé ou terminé' };
+      if (event.date && event.time && isPastDateTime(event.date, event.time)) {
+        return { success: false, error: 'Impossible d’ajouter un service à un événement déjà passé' };
+      }
       const result = await dbRun(
         'INSERT INTO services (name, type, eventId, userId, cost, supplier, notes) VALUES (?,?,?,?,?,?,?)',
         [name, type || null, eventId, userId, cost, supplier || null, notes || null]
@@ -2470,6 +2867,7 @@ async function executeChatTool(toolName, args, userId, userRole) {
       if (!eventId) return { success: false, error: "ID de l'événement requis" };
       const event = await dbGet('SELECT * FROM events WHERE id = ?', [eventId]);
       if (!event) return { success: false, error: 'Événement non trouvé' };
+      if (!canAccessEvent({ userId, userRole }, event, { allowFinance: true })) return { success: false, error: 'Accès refusé' };
       const existing = await dbGet('SELECT * FROM invoices WHERE eventId = ?', [eventId]);
       if (existing) return { success: false, error: `Une facture existe déjà (${existing.number}, total: ${existing.total}$)` };
       const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [eventId]);
