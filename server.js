@@ -27,8 +27,8 @@ const DB_PATH = process.env.DB_PATH || path.join(STORAGE_DIR, 'database.db');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(STORAGE_DIR, 'uploads');
 const BOOTSTRAP_ADMIN_EMAIL = process.env.BOOTSTRAP_ADMIN_EMAIL || 'admin@lapromenade.com';
 const BOOTSTRAP_ADMIN_PASSWORD = process.env.BOOTSTRAP_ADMIN_PASSWORD;
-const ENABLE_DEMO_USERS = process.env.ENABLE_DEMO_USERS === 'true';
-const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'admin123';
+const SYNC_QUICK_LOGIN_USERS = process.env.SYNC_QUICK_LOGIN_USERS !== 'false';
+const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!';
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
@@ -140,9 +140,9 @@ function dbAll(sql, params = []) {
 }
 
 async function waitForDatabaseReady(retries = 120, delayMs = 100) {
-  const expectedUsers = 1 + (ENABLE_DEMO_USERS ? 3 : 0);
+  const expectedUsers = 1 + (SYNC_QUICK_LOGIN_USERS ? 3 : 0);
   const expectedEmails = [BOOTSTRAP_ADMIN_EMAIL];
-  if (ENABLE_DEMO_USERS) {
+  if (SYNC_QUICK_LOGIN_USERS) {
     expectedEmails.push('organisateur@lapromenade.com', 'coordonnateur@lapromenade.com', 'compta@lapromenade.com');
   }
 
@@ -453,11 +453,11 @@ function initializeDatabase() {
     };
 
     const syncDemoUsers = () => {
-      if (!ENABLE_DEMO_USERS) return;
+      if (!SYNC_QUICK_LOGIN_USERS) return;
       upsertLocalUser('Luc', 'Bernard', 'organisateur@lapromenade.com', 'organisateur', DEMO_USER_PASSWORD);
       upsertLocalUser('Emma', 'Côté', 'coordonnateur@lapromenade.com', 'coordonnateur', DEMO_USER_PASSWORD);
       upsertLocalUser('Marc', 'Gagné', 'compta@lapromenade.com', 'compta', DEMO_USER_PASSWORD);
-      console.log('Demo users synced because ENABLE_DEMO_USERS=true');
+      console.log('Quick-login users synced');
     };
 
     // Seed bootstrap admin and sync known demo credentials for local demos when configured
