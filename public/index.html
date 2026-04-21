@@ -859,27 +859,6 @@ body {
 .btn-danger:hover { background: var(--danger); color: #fff; }
 .btn-sm { padding: 7px 14px; font-size: 11px; }
 .btn-full { width: 100%; justify-content: center; }
-.login-roles {
-  margin-top: 24px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.role-btn {
-  padding: 10px 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  font-family: 'DM Sans', sans-serif;
-  font-size: 11px;
-  letter-spacing: 1px;
-  cursor: pointer;
-  border-radius: 2px;
-  transition: all 0.2s;
-  text-align: center;
-}
-.role-btn:hover, .role-btn.active { border-color: var(--gold); color: var(--gold); background: rgba(201,168,76,0.05); }
-
 /* ── LAYOUT ── */
 #app { display: none; }
 .layout { display: flex; min-height: 100vh; }
@@ -2908,13 +2887,6 @@ body {
   background: rgba(255,255,255,0.02);
 }
 
-.role-btn {
-  border-radius: 999px;
-  padding: 11px 12px;
-  font-size: 10px;
-  letter-spacing: 1.2px;
-}
-
 .sidebar {
   background:
     linear-gradient(180deg, rgba(201,168,76,0.05), transparent 20%),
@@ -3557,15 +3529,6 @@ textarea {
         <div class="form-group">
           <label>Mot de passe</label>
           <input type="password" id="login-password" placeholder="••••••••••" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" data-form-type="other" readonly>
-        </div>
-        <div style="margin-bottom:20px">
-          <div style="font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--text-muted);margin-bottom:8px">Accès rapide</div>
-          <div class="login-roles">
-            <button class="role-btn active" onclick="selectRole(this,'admin@lapromenade.com')">Administrateur</button>
-            <button class="role-btn" onclick="selectRole(this,'organisateur@lapromenade.com')">Organisateur</button>
-            <button class="role-btn" onclick="selectRole(this,'coordonnateur@lapromenade.com')">Coordonnateur</button>
-            <button class="role-btn" onclick="selectRole(this,'compta@lapromenade.com')">Comptabilité</button>
-          </div>
         </div>
         <button class="btn-login-connect" onclick="doLogin()">Se connecter</button>
         <div style="text-align:center;margin-top:20px">
