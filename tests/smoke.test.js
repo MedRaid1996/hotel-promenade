@@ -206,6 +206,12 @@ test('date and room reservation rules are enforced', async () => {
   });
   assert.equal(firstReservation.response.status, 201, JSON.stringify(firstReservation.body));
 
+  const reservationList = await api('/api/reservations', {
+    headers: { 'Authorization': `Bearer ${adminToken}` }
+  });
+  assert.equal(reservationList.response.status, 200);
+  assert.ok(reservationList.body.reservations.some((reservation) => reservation.id === firstReservation.body.id));
+
   const overlappingReservation = await api('/api/rooms/reserve', {
     method: 'POST',
     headers: {
@@ -220,6 +226,97 @@ test('date and room reservation rules are enforced', async () => {
     })
   });
   assert.equal(overlappingReservation.response.status, 409);
+});
+
+test('admin can assign events to an organizer account', async () => {
+  const assigned = await registerUser({
+    fname: 'Assigned',
+    lname: 'Owner',
+    email: 'assigned-owner@example.com',
+    password: 'AssignedOwner123!'
+  });
+  await registerUser({
+    fname: 'Unassigned',
+    lname: 'Other',
+    email: 'unassigned-other@example.com',
+    password: 'UnassignedOther123!'
+  });
+
+  const adminToken = await login('admin@lapromenade.com', 'AdminTestPass123!');
+  const assignedToken = await login('assigned-owner@example.com', 'AssignedOwner123!');
+  const otherToken = await login('unassigned-other@example.com', 'UnassignedOther123!');
+
+  const created = await api('/api/events', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({
+      name: 'Admin Assigned Gala',
+      type: 'Gala',
+      date: futureDate(75),
+      time: '18:00',
+      ownerUserId: assigned.user.id
+    })
+  });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+
+  const assignedEvents = await api('/api/events', {
+    headers: { 'Authorization': `Bearer ${assignedToken}` }
+  });
+  assert.equal(assignedEvents.response.status, 200);
+  assert.ok(assignedEvents.body.events.some((event) => event.id === created.body.id));
+
+  const otherEvents = await api('/api/events', {
+    headers: { 'Authorization': `Bearer ${otherToken}` }
+  });
+  assert.equal(otherEvents.response.status, 200);
+  assert.ok(!otherEvents.body.events.some((event) => event.id === created.body.id));
+});
+
+test('guests can be imported from a CSV file', async () => {
+  const owner = await registerUser({
+    fname: 'Csv',
+    lname: 'Owner',
+    email: 'csv-owner@example.com',
+    password: 'CsvOwner123!'
+  });
+  const ownerToken = await login('csv-owner@example.com', 'CsvOwner123!');
+
+  const eventResult = await api('/api/events', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${ownerToken}`
+    },
+    body: JSON.stringify({
+      name: 'CSV Import Event',
+      type: 'Réunion',
+      date: futureDate(80),
+      time: '10:00',
+      ownerUserId: owner.user.id
+    })
+  });
+  assert.equal(eventResult.response.status, 201, JSON.stringify(eventResult.body));
+
+  const form = new FormData();
+  form.append('eventId', String(eventResult.body.id));
+  form.append('file', new Blob(['prenom,nom,email,telephone\nAlice,Martin,alice.martin@example.com,5145550101\nBob,Tremblay,bob.tremblay@example.com,5145550102\n'], { type: 'text/csv' }), 'guests.csv');
+
+  const imported = await api('/api/guests/import', {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${ownerToken}` },
+    body: form
+  });
+  assert.equal(imported.response.status, 200, JSON.stringify(imported.body));
+  assert.match(imported.body.message, /2 invités importés/);
+
+  const guests = await api(`/api/guests?eventId=${eventResult.body.id}`, {
+    headers: { 'Authorization': `Bearer ${ownerToken}` }
+  });
+  assert.equal(guests.response.status, 200);
+  assert.equal(guests.body.guests.length, 2);
 });
 
 test('payments and reports are scoped to the owner', async () => {

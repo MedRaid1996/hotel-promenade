@@ -1735,6 +1735,58 @@ const DAYS = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
 // FullCalendar instance
 let roomsCalendar = null;
 
+function buildRoomsCalendarEvents() {
+  const fcEvents = DATA.events
+    .filter(e => e.date && e.status !== 'Annulé')
+    .map(e => {
+      const start = e.date + (e.time ? 'T' + e.time : '');
+      let end = e.date;
+      if (e.endTime) {
+        end = e.date + 'T' + e.endTime;
+      } else if (e.time && e.duration) {
+        const durationHours = parseInt(e.duration) || 2;
+        const [h, m] = e.time.split(':').map(Number);
+        const endH = h + durationHours;
+        end = e.date + 'T' + String(endH).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+      }
+
+      return {
+        id: e.id,
+        title: e.name,
+        start,
+        end,
+        extendedProps: {
+          room: e.room,
+          guests: e.guests,
+          status: e.status,
+          type: e.type,
+          organizer: e.organizer
+        },
+        classNames: [getEventStatusClass(e.status)],
+        editable: e.status !== 'Terminé' && e.status !== 'Annulé'
+      };
+    });
+
+  const reservationEvents = DATA.reservations
+    .filter(r => r.date && r.status !== 'Annulé')
+    .map(r => ({
+      id: 'res-' + r.id,
+      title: `📍 ${r.roomName || 'Salle'} - ${r.eventName || 'Réservation'}`,
+      start: r.date + (r.startTime ? 'T' + r.startTime : ''),
+      end: r.date + (r.endTime ? 'T' + r.endTime : ''),
+      backgroundColor: r.status === 'Confirmé' ? 'var(--success)' : 'var(--warning)',
+      borderColor: r.status === 'Confirmé' ? 'var(--success)' : 'var(--warning)',
+      extendedProps: {
+        isReservation: true,
+        roomId: r.roomId,
+        status: r.status
+      },
+      editable: false
+    }));
+
+  return [...fcEvents, ...reservationEvents];
+}
+
 function renderCalendar(targetId = 'cal-grid', dateRef = null) {
   const d = dateRef || calDate;
   const title = document.getElementById(targetId === 'cal-grid' ? 'cal-title' : 'cal2-title');
@@ -2018,23 +2070,8 @@ function initRoomsFullCalendar() {
 // Refresh FullCalendar after data changes
 function refreshFullCalendar() {
   if (roomsCalendar) {
-    // Re-fetch events and update
-    const fcEvents = DATA.events
-      .filter(e => e.date && e.status !== 'Annulé')
-      .map(e => ({
-        id: e.id,
-        title: e.name,
-        start: e.date + (e.time ? 'T' + e.time : ''),
-        end: e.endTime ? e.date + 'T' + e.endTime : undefined,
-        classNames: [getEventStatusClass(e.status)],
-        extendedProps: {
-          room: e.room,
-          status: e.status
-        }
-      }));
-    
     roomsCalendar.removeAllEvents();
-    roomsCalendar.addEventSource(fcEvents);
+    roomsCalendar.addEventSource(buildRoomsCalendarEvents());
   }
 }
 
@@ -2101,7 +2138,31 @@ function viewEvent(id) {
   showToast(`Événement: ${e.name} — ${formatDate(e.date)}`, 'info');
 }
 
-function editEvent(id) {
+async function populateEventOwnerSelect(selectedOwnerId = '') {
+  const group = document.getElementById('ev-owner-group');
+  const select = document.getElementById('ev-owner');
+  if (!group || !select) return;
+  if (currentRole !== 'admin') {
+    group.style.display = 'none';
+    select.value = '';
+    return;
+  }
+  group.style.display = '';
+  try {
+    if (!DATA.users.length) {
+      const data = await fetchUsers();
+      DATA.users = data.users || [];
+    }
+  } catch (err) {
+    console.warn('Could not load users for event owner select:', err);
+  }
+  const assignableUsers = DATA.users.filter(user => ['organisateur', 'admin', 'coordonnateur'].includes(user.role) && user.status !== 'Inactif');
+  select.innerHTML = '<option value="">— Administrateur / non assigné —</option>' +
+    assignableUsers.map(user => `<option value="${user.id}">${escapeHtml(`${user.fname || ''} ${user.lname || ''}`.trim() || user.email)} (${ROLE_LABELS[user.role] || user.role})</option>`).join('');
+  select.value = selectedOwnerId ? String(selectedOwnerId) : '';
+}
+
+async function editEvent(id) {
   const e = DATA.events.find(ev => ev.id === id);
   if (!e) return;
   editingEventId = id;
@@ -2117,6 +2178,7 @@ function editEvent(id) {
   document.getElementById('ev-contact').value = e.contact || '';
   document.getElementById('ev-desc').value = e.description || e.desc || '';
   if (e.room) document.getElementById('ev-room').value = e.room;
+  await populateEventOwnerSelect(e.userId || '');
   openModal('event-modal');
 }
 
@@ -2369,6 +2431,68 @@ async function renderGuests(filter = '') {
 }
 
 function filterGuests(v) { renderGuests(v); }
+
+let pendingGuestImportEventId = null;
+
+async function openGuestCsvImport() {
+  try {
+    if (!DATA.events.length) {
+      const eventData = await fetchEvents();
+      DATA.events = eventData.events || [];
+    }
+  } catch (err) {
+    showToast('Impossible de charger les événements pour l’import.', 'error');
+    return;
+  }
+
+  const usableEvents = DATA.events.filter(isUsableEvent);
+  const eventOptions = usableEvents.map(e => `<option value="${e.id}">${escapeHtml(e.name)} (${formatDate(e.date)})</option>`).join('');
+  const result = await promptForm({
+    title: 'Importer des invités CSV',
+    confirmText: 'Choisir le fichier CSV',
+    html: `
+      <div style="display:grid;gap:12px;text-align:left">
+        <p style="color:var(--text-muted);font-size:12px;margin:0">Colonnes acceptées: prenom, nom, email/courriel, telephone. Les lignes invalides seront ignorées.</p>
+        <label style="font-size:12px;color:var(--text-muted)">Événement associé</label>
+        <select id="swal-import-event" class="swal2-input" style="margin:0;width:100%">
+          <option value="">Aucun événement</option>
+          ${eventOptions}
+        </select>
+      </div>
+    `,
+    preConfirm: () => ({ eventId: document.getElementById('swal-import-event').value || '' })
+  });
+  if (!result) return;
+  pendingGuestImportEventId = result.eventId || null;
+  const input = document.getElementById('guest-csv-input');
+  if (input) {
+    input.value = '';
+    input.click();
+  }
+}
+
+async function handleGuestCsvImport(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  if (!/\.csv$/i.test(file.name)) {
+    showToast('Veuillez choisir un fichier CSV.', 'error');
+    input.value = '';
+    return;
+  }
+  try {
+    showLoading('Import CSV en cours...');
+    const result = await importGuests(file, pendingGuestImportEventId);
+    hideLoading();
+    showToast(result.message || 'Invités importés.', 'success');
+    renderGuests();
+  } catch (err) {
+    hideLoading();
+    showToast(err.message || 'Erreur d’import CSV', 'error');
+  } finally {
+    pendingGuestImportEventId = null;
+    input.value = '';
+  }
+}
 
 async function doSendInvitation(id) {
   const button = getClickedButton();
@@ -3219,7 +3343,7 @@ function closeModal(id) {
   }
 }
 
-function openEventModal() {
+async function openEventModal() {
   editingEventId = null;
   document.getElementById('event-modal-title').textContent = 'Nouvel événement';
   document.getElementById('ev-name').value = '';
@@ -3232,6 +3356,7 @@ function openEventModal() {
   document.getElementById('ev-organizer').value = '';
   document.getElementById('ev-contact').value = '';
   document.getElementById('ev-desc').value = '';
+  await populateEventOwnerSelect('');
   openModal('event-modal');
 }
 
@@ -3269,6 +3394,7 @@ function buildEventPayload(status) {
     contact,
     description: document.getElementById('ev-desc').value,
     status,
+    ownerUserId: document.getElementById('ev-owner')?.value || undefined,
   } };
 }
 

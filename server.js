@@ -610,6 +610,29 @@ function cleanStatus(value, allowed, fallback) {
   return allowed.has(status) ? status : null;
 }
 
+async function resolveEventOwnerId(req, fallbackUserId) {
+  if (req.userRole !== 'admin') return fallbackUserId;
+  const requested = toNonNegativeInteger(req.body.ownerUserId ?? req.body.userId, null);
+  if (!requested) return fallbackUserId;
+  const owner = await dbGet('SELECT id, role, status FROM users WHERE id = ?', [requested]);
+  if (!owner) {
+    const err = new Error('Organisateur assigné introuvable');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (owner.status === 'Inactif') {
+    const err = new Error('Impossible d’assigner un événement à un utilisateur inactif');
+    err.statusCode = 400;
+    throw err;
+  }
+  if (!['organisateur', 'admin', 'coordonnateur'].includes(owner.role)) {
+    const err = new Error('Ce rôle ne peut pas être propriétaire d’un événement');
+    err.statusCode = 400;
+    throw err;
+  }
+  return owner.id;
+}
+
 function toFiniteNumber(value, fallback = 0) {
   if (value === '' || value === null || value === undefined) return fallback;
   const n = Number(value);
@@ -1123,15 +1146,16 @@ app.post('/api/events', verifyToken, async (req, res) => {
     const validation = validateEventInput(req.body, { defaultStatus: 'Planifié' });
     if (validation.error) return res.status(400).json({ error: validation.error });
     const { name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status } = validation.value;
+    const ownerId = await resolveEventOwnerId(req, req.userId);
     const result = await dbRun(
       `INSERT INTO events (name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status, userId)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status, req.userId]
+      [name, type, date, time, endTime, duration, budget, guests, room, organizer, contact, description, status, ownerId]
     );
     await logAudit(req.userId, 'CREATE', 'events', result.lastID, `Événement créé: ${name}`);
     await notifyRole('coordonnateur', 'Nouvel événement', `"${name}" a été créé.`, 'info');
     // Real-time: notify all clients about new event
-    emitRealtimeEvent('event:created', { id: result.lastID, name, type, date, status, userId: req.userId });
+    emitRealtimeEvent('event:created', { id: result.lastID, name, type, date, status, userId: ownerId });
     res.status(201).json({ id: result.lastID, message: 'Événement créé' });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -1150,16 +1174,17 @@ app.put('/api/events/:id', verifyToken, async (req, res) => {
     const validation = validateEventInput(merged, { defaultStatus: event.status || 'Planifié' });
     if (validation.error) return res.status(400).json({ error: validation.error });
     const { name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description } = validation.value;
+    const ownerId = await resolveEventOwnerId(req, event.userId);
     await dbRun(
-      `UPDATE events SET name=?, type=?, date=?, time=?, endTime=?, duration=?, status=?, budget=?, guests=?, room=?, organizer=?, contact=?, description=? WHERE id=?`,
-      [name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description, req.params.id]
+      `UPDATE events SET name=?, type=?, date=?, time=?, endTime=?, duration=?, status=?, budget=?, guests=?, room=?, organizer=?, contact=?, description=?, userId=? WHERE id=?`,
+      [name, type, date, time, endTime, duration, status, budget, guests, room, organizer, contact, description, ownerId, req.params.id]
     );
     await logAudit(req.userId, 'UPDATE', 'events', req.params.id, `Événement modifié: ${name}`);
     if (status === 'Annulé') {
       await notifyRole('coordonnateur', 'Événement annulé', `"${name}" a été annulé.`, 'warning');
     }
     // Real-time: notify all clients about updated event
-    emitRealtimeEvent('event:updated', { id: parseInt(req.params.id), name, type, date, status });
+    emitRealtimeEvent('event:updated', { id: parseInt(req.params.id), name, type, date, status, userId: ownerId });
     res.json({ message: 'Événement modifié' });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -2465,7 +2490,7 @@ app.get('/api/reports/events-by-type', verifyToken, async (req, res) => {
     const data = await dbAll(`SELECT type, COUNT(*) as count FROM events${filter.clause} GROUP BY type ORDER BY count DESC`, filter.params);
     res.json({ data });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
   }
 });
 
@@ -2479,7 +2504,7 @@ app.get('/api/reports/revenue-by-month', verifyToken, async (req, res) => {
     `, filter.params);
     res.json({ data });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
   }
 });
 
@@ -2495,7 +2520,7 @@ app.get('/api/reports/room-occupancy', verifyToken, async (req, res) => {
     `, hasGlobalReportAccess(req.userRole) ? [] : [req.userId]);
     res.json({ data });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
   }
 });
 
@@ -2508,7 +2533,7 @@ app.get('/api/reports/services-cost', verifyToken, async (req, res) => {
     `, filter.params);
     res.json({ data });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
   }
 });
 
