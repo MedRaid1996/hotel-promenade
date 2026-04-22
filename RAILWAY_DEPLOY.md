@@ -20,13 +20,13 @@ NODE_ENV=production
 JWT_SECRET=generate-a-long-random-secret
 BOOTSTRAP_ADMIN_EMAIL=admin@lapromenade.com
 BOOTSTRAP_ADMIN_PASSWORD=choose-a-secure-admin-password
-ENABLE_DEMO_USERS=false
+SYNC_QUICK_LOGIN_USERS=false
 DEMO_USER_PASSWORD=choose-a-secure-demo-password
 HOTEL_BILLING_FROM_NAME=Hotel La Promenade
 CONCIERGE_TIMEZONE=America/Toronto
 ```
 
-Optional variables:
+Optional API variables for invoices, concierge IA, and Telegram:
 
 ```env
 GMAIL_USER=
@@ -38,6 +38,37 @@ GROQ_API_KEY=
 ```
 
 Do not add `PORT`; Railway provides it automatically.
+
+To sync only these API variables from your local `.env` to Railway without pushing the whole `.env` file, first login:
+
+```powershell
+npx @railway/cli@latest login
+```
+
+Then run:
+
+```powershell
+.\scripts\sync-railway-api-env.ps1 -Environment production
+```
+
+If Railway asks for a service name, rerun with the service name:
+
+```powershell
+.\scripts\sync-railway-api-env.ps1 -Environment production -Service hotel-promenade
+```
+
+This script only sends:
+
+```text
+HOTEL_BILLING_FROM_NAME
+GMAIL_USER
+GMAIL_APP_PASS
+TELEGRAM_BOT_TOKEN
+TELEGRAM_ADMIN_CHAT_ID
+CONCIERGE_TIMEZONE
+GEMINI_API_KEY
+GROQ_API_KEY
+```
 
 ## 3. Add persistent storage for SQLite and uploads
 
