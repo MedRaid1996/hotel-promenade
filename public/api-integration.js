@@ -172,6 +172,9 @@ async function fetchRooms(filters = {}) {
   return apiRequest(`/rooms${qs ? `?${qs}` : ''}`);
 }
 async function fetchRoom(id) { return apiRequest(`/rooms/${id}`); }
+async function createRoom(data) { return apiRequest('/rooms', 'POST', data); }
+async function updateRoom(id, data) { return apiRequest(`/rooms/${id}`, 'PUT', data); }
+async function deleteRoom(id) { return apiRequest(`/rooms/${id}`, 'DELETE'); }
 
 async function fetchReservations() { return apiRequest('/reservations'); }
 async function reserveRoom(data) { return apiRequest('/rooms/reserve', 'POST', data); }
@@ -184,7 +187,7 @@ async function fetchGuests(params = {}) {
 async function createGuest(data) { return apiRequest('/guests', 'POST', data); }
 async function updateGuest(id, data) { return apiRequest(`/guests/${id}`, 'PUT', data); }
 async function deleteGuest(id) { return apiRequest(`/guests/${id}`, 'DELETE'); }
-async function sendInvitation(id) { return apiRequest(`/guests/${id}/invite`, 'POST'); }
+async function sendInvitation(id, data = {}) { return apiRequest(`/guests/${id}/invite`, 'POST', data); }
 
 async function importGuests(file, eventId) {
   const fd = new FormData();
@@ -212,10 +215,17 @@ async function fetchServices(eventId) {
 }
 async function createService(data) { return apiRequest('/services', 'POST', data); }
 async function updateService(id, data) { return apiRequest(`/services/${id}`, 'PUT', data); }
+async function fetchServiceCatalog(includeInactive = false) { return apiRequest(`/service-catalog${includeInactive ? '?includeInactive=1' : ''}`); }
+async function createCatalogService(data) { return apiRequest('/service-catalog', 'POST', data); }
+async function updateCatalogService(id, data) { return apiRequest(`/service-catalog/${id}`, 'PUT', data); }
+async function deleteCatalogService(id) { return apiRequest(`/service-catalog/${id}`, 'DELETE'); }
 
 async function fetchDevis(eventId) { return apiRequest(`/devis/${eventId}`); }
 
-async function fetchInvoices() { return apiRequest('/invoices'); }
+async function fetchInvoices(filters = {}) {
+  const qs = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined && value !== null && value !== '')).toString();
+  return apiRequest(`/invoices${qs ? `?${qs}` : ''}`);
+}
 async function createInvoice(data) { return apiRequest('/invoices', 'POST', data); }
 async function generateInvoice(eventId, client) { return apiRequest(`/invoices/generate/${eventId}`, 'POST', { client }); }
 async function updateInvoice(id, data) { return apiRequest(`/invoices/${id}`, 'PUT', data); }
@@ -253,6 +263,8 @@ async function markNotificationRead(id) { return apiRequest(`/notifications/${id
 async function markAllNotificationsRead() { return apiRequest('/notifications/read-all', 'PUT'); }
 async function fetchNotifPreferences() { return apiRequest('/notification-preferences'); }
 async function updateNotifPreferences(prefs) { return apiRequest('/notification-preferences', 'PUT', prefs); }
+async function fetchSettings() { return apiRequest('/settings'); }
+async function updateSettings(data) { return apiRequest('/settings', 'PUT', data); }
 
 async function fetchUsers() { return apiRequest('/users'); }
 async function createUser(data) { return apiRequest('/users', 'POST', data); }
@@ -261,14 +273,18 @@ async function deactivateUser(id) { return apiRequest(`/users/${id}`, 'DELETE');
 
 async function fetchAudit() { return apiRequest('/audit'); }
 
-async function fetchReportSummary() { return apiRequest('/reports/summary'); }
-async function fetchEventsByType() { return apiRequest('/reports/events-by-type'); }
-async function fetchRevenueByMonth() { return apiRequest('/reports/revenue-by-month'); }
-async function fetchRoomOccupancy() { return apiRequest('/reports/room-occupancy'); }
-async function fetchServicesCost() { return apiRequest('/reports/services-cost'); }
+function reportQuery(filters = {}) {
+  return new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined && value !== null && value !== '')).toString();
+}
+async function fetchReportSummary(filters = {}) { const qs = reportQuery(filters); return apiRequest(`/reports/summary${qs ? `?${qs}` : ''}`); }
+async function fetchEventsByType(filters = {}) { const qs = reportQuery(filters); return apiRequest(`/reports/events-by-type${qs ? `?${qs}` : ''}`); }
+async function fetchRevenueByMonth(filters = {}) { const qs = reportQuery(filters); return apiRequest(`/reports/revenue-by-month${qs ? `?${qs}` : ''}`); }
+async function fetchRoomOccupancy(filters = {}) { const qs = reportQuery(filters); return apiRequest(`/reports/room-occupancy${qs ? `?${qs}` : ''}`); }
+async function fetchServicesCost(filters = {}) { const qs = reportQuery(filters); return apiRequest(`/reports/services-cost${qs ? `?${qs}` : ''}`); }
 
-async function downloadReportCsv() {
-  const blob = await apiRequest('/reports/export.csv');
+async function downloadReportCsv(filters = {}) {
+  const qs = reportQuery(filters);
+  const blob = await apiRequest(`/reports/export.csv${qs ? `?${qs}` : ''}`);
   if (blob instanceof Blob) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -279,8 +295,9 @@ async function downloadReportCsv() {
   }
 }
 
-async function downloadReportPdf() {
-  const blob = await apiRequest('/reports/export.pdf');
+async function downloadReportPdf(filters = {}) {
+  const qs = reportQuery(filters);
+  const blob = await apiRequest(`/reports/export.pdf${qs ? `?${qs}` : ''}`);
   if (blob instanceof Blob) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -311,6 +328,9 @@ Object.assign(window, {
   deleteDocument,
   fetchRooms,
   fetchRoom,
+  createRoom,
+  updateRoom,
+  deleteRoom,
   fetchReservations,
   reserveRoom,
   updateReservation,
@@ -324,6 +344,10 @@ Object.assign(window, {
   fetchServices,
   createService,
   updateService,
+  fetchServiceCatalog,
+  createCatalogService,
+  updateCatalogService,
+  deleteCatalogService,
   fetchDevis,
   fetchInvoices,
   createInvoice,
@@ -339,6 +363,8 @@ Object.assign(window, {
   markAllNotificationsRead,
   fetchNotifPreferences,
   updateNotifPreferences,
+  fetchSettings,
+  updateSettings,
   fetchUsers,
   createUser,
   updateUser,

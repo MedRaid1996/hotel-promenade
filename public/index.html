@@ -4305,6 +4305,13 @@ button {
             <button type="button" class="tab" onclick="switchTab(this,'rooms-calendar')" data-target="rooms-calendar">Calendrier</button>
           </div>
           <div id="rooms-list">
+            <div class="section-header" style="margin-bottom:16px">
+              <select id="room-type-filter" onchange="renderRooms()" aria-label="Filtrer par type de salle"><option value="">Tous les types</option></select>
+              <input type="number" id="room-capacity-filter" min="0" placeholder="Capacité min." oninput="renderRooms()" aria-label="Capacité minimale">
+              <input type="text" id="room-feature-filter" placeholder="Équipement (wifi, micro...)" oninput="renderRooms()" aria-label="Filtrer par équipement">
+              <div class="section-line"></div>
+              <button class="btn btn-sm admin-only-control" onclick="openRoomAdminModal()">+ Salle / tarif</button>
+            </div>
             <div class="room-grid" id="rooms-grid"></div>
           </div>
           <div id="rooms-reservations" style="display:none">
@@ -4329,9 +4336,9 @@ button {
             </div>
             <div class="section-line"></div>
             <button class="btn btn-sm" onclick="openGuestModal()">+ Ajouter</button>
-            <button class="btn btn-sm" onclick="openGuestCsvImport()">↑ Import CSV</button>
+            <button class="btn btn-sm" onclick="openGuestCsvImport()">↑ Import CSV/Excel</button>
             <button class="btn btn-sm" onclick="exportGuests()">↓ Exporter</button>
-            <input type="file" id="guest-csv-input" accept=".csv,text/csv" style="display:none" onchange="handleGuestCsvImport(this)">
+            <input type="file" id="guest-csv-input" accept=".csv,.xls,.xlsx,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display:none" onchange="handleGuestCsvImport(this)">
           </div>
           <div class="table-wrap"><table>
             <thead><tr><th>Nom</th><th>Courriel</th><th>Événement</th><th>Statut</th><th>VIP</th><th>Actions</th></tr></thead>
@@ -4352,6 +4359,10 @@ button {
             </table></div>
           </div>
           <div id="svc-catalog" style="display:none">
+            <div class="section-header admin-only-control" style="margin-bottom:16px">
+              <div class="section-line"></div>
+              <button class="btn btn-sm" onclick="openCatalogServiceModal()">+ Service catalogue</button>
+            </div>
             <div class="grid-3" id="services-catalog-grid"></div>
           </div>
         </div>
@@ -4363,6 +4374,12 @@ button {
             <button type="button" class="tab" onclick="switchTab(this,'billing-payments')" data-target="billing-payments">Paiements</button>
           </div>
           <div id="billing-invoices">
+            <div class="section-header" style="margin-bottom:16px">
+              <select id="invoice-event-filter" onchange="renderBilling()" aria-label="Filtrer les factures par événement"><option value="">Tous les événements</option></select>
+              <select id="invoice-status-filter" onchange="renderBilling()" aria-label="Filtrer les factures par statut"><option value="">Tous les statuts</option><option>En attente</option><option>Partiel</option><option>Payée</option><option>En retard</option><option>Brouillon</option></select>
+              <input type="date" id="invoice-from-filter" onchange="renderBilling()" aria-label="Factures depuis">
+              <input type="date" id="invoice-to-filter" onchange="renderBilling()" aria-label="Factures jusqu'à">
+            </div>
             <div class="table-wrap"><table>
               <thead><tr><th>Facture #</th><th>Événement</th><th>Client</th><th>Montant</th><th>TPS/TVQ</th><th>Total</th><th>Statut</th><th>Actions</th></tr></thead>
               <tbody id="invoices-tbody"></tbody>
@@ -4385,8 +4402,11 @@ button {
               <h3 style="margin:0">Rapports analytiques</h3>
             </div>
             <div style="display:flex;gap:8px;flex-wrap:wrap">
-              <button class="btn btn-sm" onclick="downloadReportCsv()">↓ Export Excel/CSV</button>
-              <button class="btn btn-sm" onclick="downloadReportPdf()">📄 Export PDF</button>
+              <input type="date" id="report-from-filter" onchange="renderReports()" aria-label="Rapports depuis">
+              <input type="date" id="report-to-filter" onchange="renderReports()" aria-label="Rapports jusqu'à">
+              <select id="report-event-filter" onchange="renderReports()" aria-label="Filtrer les rapports par événement"><option value="">Tous les événements</option></select>
+              <button class="btn btn-sm" onclick="downloadReportCsv(getReportFilters())">↓ Export Excel/CSV</button>
+              <button class="btn btn-sm" onclick="downloadReportPdf(getReportFilters())">📄 Export PDF</button>
               <button class="btn btn-sm" onclick="window.print()">Version imprimable</button>
             </div>
           </div>
@@ -4459,11 +4479,33 @@ button {
               <tbody id="audit-tbody"></tbody>
             </table></div>
           </div>
+          <div class="card admin-only-control" style="margin-top:20px">
+            <div class="card-title">Paramètres, taxes et facturation</div>
+            <div class="grid-2">
+              <div class="form-group"><label>Nom de l'hôtel</label><input id="setting-hotelName" type="text"></div>
+              <div class="form-group"><label>Délai de paiement facture (jours)</label><input id="setting-invoicePaymentTermsDays" type="number" min="1"></div>
+              <div class="form-group"><label>Taux TPS/TVQ</label><input id="setting-taxRate" type="number" min="0" step="0.0001"></div>
+              <div class="form-group"><label>Courriel contact</label><input id="setting-contactEmail" type="email"></div>
+            </div>
+            <div class="form-group"><label>Adresse de facturation</label><input id="setting-billingAddress" type="text"></div>
+            <button class="btn btn-primary btn-sm" onclick="saveSettings()">Enregistrer les paramètres</button>
+          </div>
         </div>
 
         <!-- NOTIFICATIONS -->
         <div id="page-notifications" class="page">
           <div style="max-width:720px">
+            <div class="card" style="margin-bottom:16px">
+              <div class="card-title">Préférences de notification</div>
+              <div class="grid-2">
+                <label><input type="checkbox" id="pref-email"> Email</label>
+                <label><input type="checkbox" id="pref-sms"> SMS</label>
+                <label><input type="checkbox" id="pref-events"> Rappels événements</label>
+                <label><input type="checkbox" id="pref-payments"> Alertes paiement</label>
+                <label><input type="checkbox" id="pref-services"> Suivi services</label>
+              </div>
+              <button class="btn btn-primary btn-sm" onclick="saveNotificationPreferences()">Enregistrer les préférences</button>
+            </div>
             <div style="display:flex;gap:8px;margin-bottom:16px">
               <button class="btn btn-sm" onclick="markAllRead()">✓ Tout marquer comme lu</button>
             </div>
@@ -4498,7 +4540,11 @@ button {
       </div>
       <div class="form-row">
         <div class="form-group"><label>Heure de début</label><input type="time" id="ev-time" value="09:00"></div>
+        <div class="form-group"><label>Heure de fin</label><input type="time" id="ev-end-time" value="11:00"></div>
+      </div>
+      <div class="form-row">
         <div class="form-group"><label>Budget estimé (CAD)</label><input type="number" id="ev-budget" placeholder="5000" min="0" step="0.01"></div>
+        <div class="form-group"><label>Statut initial</label><input type="text" value="Planifié ou brouillon" disabled></div>
       </div>
       <div class="form-group"><label>Description</label><textarea id="ev-desc" rows="3" style="resize:vertical" placeholder="Décrivez l'événement..."></textarea></div>
       <div class="form-section-title">Salle & Services</div>
@@ -4521,6 +4567,60 @@ button {
     <div class="modal-footer">
       <button class="btn btn-sm" onclick="saveEventDraft()">💾 Brouillon</button>
       <button class="btn btn-primary btn-sm" onclick="saveEvent()">Enregistrer l'événement</button>
+    </div>
+  </div>
+</div>
+
+<!-- Room Admin Modal -->
+<div class="modal-overlay" id="room-admin-modal" role="dialog" aria-modal="true" aria-labelledby="room-admin-title">
+  <div class="modal" tabindex="-1">
+    <div class="modal-header">
+      <div class="modal-title" id="room-admin-title">Salle et tarif</div>
+      <button class="modal-close" onclick="closeModal('room-admin-modal')" aria-label="Fermer la fenêtre salle">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="room-admin-id">
+      <div class="form-row">
+        <div class="form-group"><label>Nom *</label><input id="room-admin-name" type="text"></div>
+        <div class="form-group"><label>Type *</label><input id="room-admin-type" type="text" placeholder="Banquet, Conférence..."></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Capacité *</label><input id="room-admin-capacity" type="number" min="1"></div>
+        <div class="form-group"><label>Tarif horaire CAD *</label><input id="room-admin-rate" type="number" min="0" step="0.01"></div>
+      </div>
+      <div class="form-group"><label>Équipements</label><input id="room-admin-features" type="text" placeholder="Wifi,Micro,Projecteur"></div>
+      <div class="form-group"><label>Disponible</label><select id="room-admin-available"><option value="1">Oui</option><option value="0">Maintenance / désactivée</option></select></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" onclick="closeModal('room-admin-modal')">Annuler</button>
+      <button class="btn btn-primary btn-sm" onclick="saveRoomAdmin()">Enregistrer</button>
+    </div>
+  </div>
+</div>
+
+<!-- Service Catalog Modal -->
+<div class="modal-overlay" id="catalog-service-modal" role="dialog" aria-modal="true" aria-labelledby="catalog-service-title">
+  <div class="modal" tabindex="-1">
+    <div class="modal-header">
+      <div class="modal-title" id="catalog-service-title">Service catalogue</div>
+      <button class="modal-close" onclick="closeModal('catalog-service-modal')" aria-label="Fermer la fenêtre service catalogue">✕</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="catalog-service-id">
+      <div class="form-row">
+        <div class="form-group"><label>Nom *</label><input id="catalog-service-name" type="text"></div>
+        <div class="form-group"><label>Type</label><input id="catalog-service-type" type="text"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Icône</label><input id="catalog-service-icon" type="text" maxlength="4"></div>
+        <div class="form-group"><label>Tarif à partir de CAD</label><input id="catalog-service-price" type="number" min="0" step="0.01"></div>
+      </div>
+      <div class="form-group"><label>Description</label><textarea id="catalog-service-description" rows="3"></textarea></div>
+      <div class="form-group"><label>Actif</label><select id="catalog-service-active"><option value="1">Oui</option><option value="0">Non</option></select></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" onclick="closeModal('catalog-service-modal')">Annuler</button>
+      <button class="btn btn-primary btn-sm" onclick="saveCatalogService()">Enregistrer</button>
     </div>
   </div>
 </div>

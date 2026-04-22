@@ -1201,19 +1201,26 @@ async function initApp() {
   buildNav();
   navigateTo('dashboard');
 
-  const startupTasks = [fetchNotifications(), fetchRooms()];
+  const startupTasks = [fetchNotifications(), fetchRooms(), fetchServiceCatalog(currentRole === 'admin')];
   if (currentRole === 'admin') startupTasks.push(fetchUsers());
 
-  const [notifData, roomData, usersData] = await Promise.allSettled(startupTasks);
+  const [notifData, roomData, catalogData, usersData] = await Promise.allSettled(startupTasks);
   DATA.notifications = notifData.status === 'fulfilled' ? (notifData.value.notifications || []) : [];
   DATA.rooms = roomData.status === 'fulfilled' ? (roomData.value.rooms || []) : [];
+  if (catalogData.status === 'fulfilled') {
+    DATA.servicesCatalog = (catalogData.value.services || []).map((item) => ({
+      ...item,
+      desc: item.description || item.desc || '',
+      priceFrom: Number(item.priceFrom || 0)
+    }));
+  }
   if (currentRole === 'admin' && usersData.status === 'fulfilled') {
     DATA.users = usersData.value.users || [];
   }
   const roomSel = document.getElementById('ev-room');
   if (roomSel) {
     roomSel.innerHTML = '<option value="">— Sélectionner —</option>' +
-      DATA.rooms.map(r => `<option>${r.name}</option>`).join('');
+      DATA.rooms.filter(r => Number(r.available) !== 0).map(r => `<option>${escapeHtml(r.name)}</option>`).join('');
   }
 
   // Fill services checkboxes in event modal
@@ -2172,6 +2179,7 @@ async function editEvent(id) {
   document.getElementById('ev-date').min = getTodayDateKey();
   document.getElementById('ev-date').value = e.date || '';
   document.getElementById('ev-time').value = e.time || '';
+  document.getElementById('ev-end-time').value = e.endTime || '';
   document.getElementById('ev-budget').value = e.budget || '';
   document.getElementById('ev-guests').value = e.guests || '';
   document.getElementById('ev-organizer').value = e.organizer || '';
@@ -2199,7 +2207,7 @@ async function cancelEvent(id) {
     try {
       setActionBusy(button, true, 'Annulation...');
       showLoading('Annulation en cours...');
-      await updateEvent(id, { name: e.name, type: e.type, date: e.date, time: e.time, duration: e.duration, status: 'Annulé', budget: e.budget, guests: e.guests, room: e.room, organizer: e.organizer, contact: e.contact, description: e.description });
+      await updateEvent(id, { name: e.name, type: e.type, date: e.date, time: e.time, endTime: e.endTime, duration: e.duration, status: 'Annulé', budget: e.budget, guests: e.guests, room: e.room, organizer: e.organizer, contact: e.contact, description: e.description });
       hideLoading();
       showSuccess('Événement annulé', `"${e.name}" a été annulé avec succès.`);
       renderEvents();
@@ -2222,8 +2230,25 @@ async function renderRooms() {
   } catch (e) { console.error('Rooms fetch error:', e); }
 
   const activeReservations = DATA.reservations.filter(isActiveReservation);
+  document.querySelectorAll('.admin-only-control').forEach(el => { el.style.display = currentRole === 'admin' ? '' : 'none'; });
+  const typeFilter = document.getElementById('room-type-filter');
+  if (typeFilter) {
+    const previous = typeFilter.value;
+    const types = [...new Set(DATA.rooms.map(r => r.type).filter(Boolean))].sort();
+    typeFilter.innerHTML = '<option value="">Tous les types</option>' + types.map(type => `<option value="${escapeHtml(type)}">${escapeHtml(type)}</option>`).join('');
+    typeFilter.value = previous;
+  }
+  const selectedType = typeFilter?.value || '';
+  const minCapacity = Number(document.getElementById('room-capacity-filter')?.value || 0);
+  const featureNeedle = (document.getElementById('room-feature-filter')?.value || '').trim().toLowerCase();
+  const visibleRooms = DATA.rooms.filter((room) => {
+    if (selectedType && room.type !== selectedType) return false;
+    if (minCapacity && Number(room.capacity || 0) < minCapacity) return false;
+    if (featureNeedle && !String(room.features || '').toLowerCase().includes(featureNeedle)) return false;
+    return true;
+  });
 
-  document.getElementById('rooms-grid').innerHTML = DATA.rooms.map(r => {
+  document.getElementById('rooms-grid').innerHTML = visibleRooms.map(r => {
     const features = typeof r.features === 'string' ? r.features.split(',').map(f => f.trim()).filter(Boolean) : (r.features || []);
     const isReserved = activeReservations.some(res => res.roomId === r.id);
     const status = r.available === 0 ? 'Maintenance' : (isReserved ? 'Réservé' : 'Disponible');
@@ -2236,7 +2261,10 @@ async function renderRooms() {
       <div class="room-capacity">👥 Capacité: ${r.capacity} personnes</div>
       <div class="room-capacity">💲 ${r.hourlyRate || 0}$ CAD / heure</div>
       <div class="room-features">${features.map(f => `<span class="feature-tag">${f}</span>`).join('')}</div>
-      ${status === 'Disponible' ? `<button class="btn btn-primary btn-sm btn-full" style="margin-top:12px" onclick="event.stopPropagation();doReserveRoom(${r.id})">Réserver</button>` : ''}
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        ${status === 'Disponible' ? `<button class="btn btn-primary btn-sm" onclick="event.stopPropagation();doReserveRoom(${r.id})">Réserver</button>` : ''}
+        ${currentRole === 'admin' ? `<button class="btn btn-sm" onclick="event.stopPropagation();openRoomAdminModal(${r.id})">Modifier</button><button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeRoomAdmin(${r.id})">Désactiver</button>` : ''}
+      </div>
     </div>`;
   }).join('') || '<div style="color:var(--text-muted);padding:32px;text-align:center">Aucune salle trouvée</div>';
 
@@ -2396,6 +2424,62 @@ async function confirmReservation(id) {
 
 function selectRoom(id) {}
 
+function openRoomAdminModal(id = null) {
+  const room = id ? DATA.rooms.find(r => Number(r.id) === Number(id)) : null;
+  document.getElementById('room-admin-title').textContent = room ? 'Modifier salle et tarif' : 'Nouvelle salle et tarif';
+  document.getElementById('room-admin-id').value = room?.id || '';
+  document.getElementById('room-admin-name').value = room?.name || '';
+  document.getElementById('room-admin-type').value = room?.type || 'Salle';
+  document.getElementById('room-admin-capacity').value = room?.capacity || '';
+  document.getElementById('room-admin-rate').value = room?.hourlyRate || '';
+  document.getElementById('room-admin-features').value = room?.features || '';
+  document.getElementById('room-admin-available').value = Number(room?.available ?? 1) === 0 ? '0' : '1';
+  openModal('room-admin-modal');
+}
+
+async function saveRoomAdmin() {
+  const id = document.getElementById('room-admin-id').value;
+  const payload = {
+    name: document.getElementById('room-admin-name').value.trim(),
+    type: document.getElementById('room-admin-type').value.trim(),
+    capacity: Number(document.getElementById('room-admin-capacity').value),
+    hourlyRate: Number(document.getElementById('room-admin-rate').value),
+    features: document.getElementById('room-admin-features').value.trim(),
+    available: document.getElementById('room-admin-available').value === '1'
+  };
+  if (!payload.name || !payload.capacity) {
+    showToast('Nom et capacité requis.', 'error');
+    return;
+  }
+  try {
+    if (id) await updateRoom(id, payload);
+    else await createRoom(payload);
+    closeModal('room-admin-modal');
+    showToast('Salle et tarif enregistrés.', 'success');
+    await renderRooms();
+  } catch (err) {
+    showToast(err.message || 'Erreur salle', 'error');
+  }
+}
+
+async function removeRoomAdmin(id) {
+  const confirmed = await confirmAction({
+    title: 'Désactiver cette salle ?',
+    text: 'La salle sera supprimée si elle n’a aucun historique, sinon mise en maintenance.',
+    icon: 'warning',
+    confirmText: 'Continuer',
+    cancelText: 'Annuler'
+  });
+  if (!confirmed) return;
+  try {
+    await deleteRoom(id);
+    showToast('Salle mise à jour.', 'success');
+    await renderRooms();
+  } catch (err) {
+    showToast(err.message || 'Erreur salle', 'error');
+  }
+}
+
 /* Section */
 async function renderGuests(filter = '') {
   try {
@@ -2448,11 +2532,11 @@ async function openGuestCsvImport() {
   const usableEvents = DATA.events.filter(isUsableEvent);
   const eventOptions = usableEvents.map(e => `<option value="${e.id}">${escapeHtml(e.name)} (${formatDate(e.date)})</option>`).join('');
   const result = await promptForm({
-    title: 'Importer des invités CSV',
-    confirmText: 'Choisir le fichier CSV',
+    title: 'Importer des invités CSV/Excel',
+    confirmText: 'Choisir le fichier',
     html: `
       <div style="display:grid;gap:12px;text-align:left">
-        <p style="color:var(--text-muted);font-size:12px;margin:0">Colonnes acceptées: prenom, nom, email/courriel, telephone. Les lignes invalides seront ignorées.</p>
+        <p style="color:var(--text-muted);font-size:12px;margin:0">Formats acceptés: CSV, XLS, XLSX. Colonnes: prenom, nom, email/courriel, telephone, statut, notes.</p>
         <label style="font-size:12px;color:var(--text-muted)">Événement associé</label>
         <select id="swal-import-event" class="swal2-input" style="margin:0;width:100%">
           <option value="">Aucun événement</option>
@@ -2474,20 +2558,20 @@ async function openGuestCsvImport() {
 async function handleGuestCsvImport(input) {
   const file = input.files && input.files[0];
   if (!file) return;
-  if (!/\.csv$/i.test(file.name)) {
-    showToast('Veuillez choisir un fichier CSV.', 'error');
+  if (!/\.(csv|xls|xlsx)$/i.test(file.name)) {
+    showToast('Veuillez choisir un fichier CSV ou Excel.', 'error');
     input.value = '';
     return;
   }
   try {
-    showLoading('Import CSV en cours...');
+    showLoading('Import invités en cours...');
     const result = await importGuests(file, pendingGuestImportEventId);
     hideLoading();
     showToast(result.message || 'Invités importés.', 'success');
     renderGuests();
   } catch (err) {
     hideLoading();
-    showToast(err.message || 'Erreur d’import CSV', 'error');
+    showToast(err.message || 'Erreur d’import invités', 'error');
   } finally {
     pendingGuestImportEventId = null;
     input.value = '';
@@ -2501,9 +2585,21 @@ async function doSendInvitation(id) {
     showToast('Courriel invité invalide ou manquant.', 'error');
     return;
   }
+  const custom = await promptForm({
+    title: 'Envoyer une invitation',
+    confirmText: 'Envoyer',
+    html: `
+      <div style="display:grid;gap:12px;text-align:left">
+        <label style="font-size:12px;color:var(--text-muted)">Message personnalisé</label>
+        <textarea id="swal-invite-message" class="swal2-textarea" style="margin:0;width:100%;min-height:120px" placeholder="Bonjour ${escapeHtml(guest.fname)}, ..."></textarea>
+      </div>
+    `,
+    preConfirm: () => ({ message: document.getElementById('swal-invite-message').value.trim() })
+  });
+  if (!custom) return;
   try {
     setActionBusy(button, true, 'Envoi...');
-    const result = await sendInvitation(id);
+    const result = await sendInvitation(id, custom);
     showToast(result.message || 'Invitation envoyée!', 'success');
     renderGuests();
   } catch (err) {
@@ -2554,8 +2650,9 @@ async function exportGuests() {
 /* Section */
 async function renderServices() {
   try {
-    const data = await fetchServices();
+    const [data, catalog] = await Promise.all([fetchServices(), fetchServiceCatalog(currentRole === 'admin')]);
     DATA.services = data.services || [];
+    DATA.servicesCatalog = (catalog.services || []).map(item => ({ ...item, desc: item.description || item.desc || '' }));
   } catch (e) { console.error('Services fetch error:', e); }
 
   document.getElementById('services-tbody').innerHTML = DATA.services.map(s => {
@@ -2576,15 +2673,66 @@ async function renderServices() {
   `;
   }).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucun service</td></tr>';
 
+  document.querySelectorAll('.admin-only-control').forEach(el => { el.style.display = currentRole === 'admin' ? '' : 'none'; });
   document.getElementById('services-catalog-grid').innerHTML = DATA.servicesCatalog.map((s, idx) => `
-    <div class="card" style="cursor:pointer" onclick="requestService(${idx})">
+    <div class="card" style="cursor:pointer" onclick="${Number(s.active) === 0 ? '' : `requestService(${idx})`}">
       <div style="font-size:28px;margin-bottom:8px">${s.icon}</div>
       <div style="font-size:15px;font-weight:500;margin-bottom:6px">${s.name}</div>
       <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">${s.desc}</div>
       <div style="font-size:11px;color:var(--gold)">À partir de ${s.priceFrom}$ / unité</div>
-      <button class="btn btn-sm btn-primary" style="margin-top:12px;width:100%" onclick="event.stopPropagation();requestService(${idx})">Demander</button>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        ${Number(s.active) !== 0 ? `<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();requestService(${idx})">Demander</button>` : '<span class="badge badge-muted">Inactif</span>'}
+        ${currentRole === 'admin' ? `<button class="btn btn-sm" onclick="event.stopPropagation();openCatalogServiceModal(${s.id})">Modifier</button><button class="btn btn-sm btn-danger" onclick="event.stopPropagation();removeCatalogService(${s.id})">Désactiver</button>` : ''}
+      </div>
     </div>
   `).join('');
+}
+
+function openCatalogServiceModal(id = null) {
+  const service = id ? DATA.servicesCatalog.find(s => Number(s.id) === Number(id)) : null;
+  document.getElementById('catalog-service-title').textContent = service ? 'Modifier service catalogue' : 'Nouveau service catalogue';
+  document.getElementById('catalog-service-id').value = service?.id || '';
+  document.getElementById('catalog-service-name').value = service?.name || '';
+  document.getElementById('catalog-service-type').value = service?.type || '';
+  document.getElementById('catalog-service-icon').value = service?.icon || '•';
+  document.getElementById('catalog-service-price').value = service?.priceFrom || 0;
+  document.getElementById('catalog-service-description').value = service?.description || service?.desc || '';
+  document.getElementById('catalog-service-active').value = Number(service?.active ?? 1) === 0 ? '0' : '1';
+  openModal('catalog-service-modal');
+}
+
+async function saveCatalogService() {
+  const id = document.getElementById('catalog-service-id').value;
+  const payload = {
+    name: document.getElementById('catalog-service-name').value.trim(),
+    type: document.getElementById('catalog-service-type').value.trim(),
+    icon: document.getElementById('catalog-service-icon').value.trim() || '•',
+    description: document.getElementById('catalog-service-description').value.trim(),
+    priceFrom: Number(document.getElementById('catalog-service-price').value || 0),
+    active: document.getElementById('catalog-service-active').value === '1'
+  };
+  if (!payload.name) return showToast('Nom du service requis.', 'error');
+  try {
+    if (id) await updateCatalogService(id, payload);
+    else await createCatalogService(payload);
+    closeModal('catalog-service-modal');
+    showToast('Catalogue de services mis à jour.', 'success');
+    await renderServices();
+  } catch (err) {
+    showToast(err.message || 'Erreur catalogue', 'error');
+  }
+}
+
+async function removeCatalogService(id) {
+  const confirmed = await confirmAction({ title: 'Désactiver ce service ?', text: 'Il restera dans l’historique mais ne sera plus proposé.', icon: 'warning', confirmText: 'Désactiver', cancelText: 'Annuler' });
+  if (!confirmed) return;
+  try {
+    await deleteCatalogService(id);
+    showToast('Service désactivé.', 'success');
+    await renderServices();
+  } catch (err) {
+    showToast(err.message || 'Erreur catalogue', 'error');
+  }
 }
 
 async function validateService(id) {
@@ -2721,7 +2869,20 @@ async function saveServiceRequest() {
 /* Section */
 async function renderBilling() {
   try {
-    const [invData, payData] = await Promise.all([fetchInvoices(), fetchPayments()]);
+    if (!DATA.events.length) DATA.events = (await fetchEvents()).events || [];
+    const eventFilter = document.getElementById('invoice-event-filter');
+    if (eventFilter) {
+      const previous = eventFilter.value;
+      eventFilter.innerHTML = '<option value="">Tous les événements</option>' + DATA.events.map(e => `<option value="${e.id}">${escapeHtml(e.name)}</option>`).join('');
+      eventFilter.value = previous;
+    }
+    const filters = {
+      eventId: eventFilter?.value || '',
+      status: document.getElementById('invoice-status-filter')?.value || '',
+      from: document.getElementById('invoice-from-filter')?.value || '',
+      to: document.getElementById('invoice-to-filter')?.value || ''
+    };
+    const [invData, payData] = await Promise.all([fetchInvoices(filters), fetchPayments()]);
     DATA.invoices = invData.invoices || [];
     DATA.payments = payData.payments || [];
   } catch (e) { console.error('Billing fetch error:', e); }
@@ -2948,12 +3109,30 @@ async function simulatePay() {
 
 /* Section */
 /* Section */
+function getReportFilters() {
+  return {
+    from: document.getElementById('report-from-filter')?.value || '',
+    to: document.getElementById('report-to-filter')?.value || '',
+    eventId: document.getElementById('report-event-filter')?.value || ''
+  };
+}
+
 async function renderReports() {
   const colors = getChartColors();
+  if (!DATA.events.length) {
+    try { DATA.events = (await fetchEvents()).events || []; } catch (e) {}
+  }
+  const eventFilter = document.getElementById('report-event-filter');
+  if (eventFilter) {
+    const previous = eventFilter.value;
+    eventFilter.innerHTML = '<option value="">Tous les événements</option>' + DATA.events.map(e => `<option value="${e.id}">${escapeHtml(e.name)}</option>`).join('');
+    eventFilter.value = previous;
+  }
+  const reportFilters = getReportFilters();
   
   // Revenue by month - Chart.js Line/Bar Chart
   try {
-    const revData = await fetchRevenueByMonth();
+    const revData = await fetchRevenueByMonth(reportFilters);
     const chartData = revData.data || [];
     const monthNames = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Jun', 'Jul', 'Aoû', 'Sep', 'Oct', 'Nov', 'Déc'];
     
@@ -3023,7 +3202,7 @@ async function renderReports() {
 
   // Events by type - Doughnut Chart
   try {
-    const typeData = await fetchEventsByType();
+    const typeData = await fetchEventsByType(reportFilters);
     const types = typeData.data || [];
     
     const canvas = document.getElementById('events-type-chart-canvas');
@@ -3070,7 +3249,7 @@ async function renderReports() {
 
   // Room occupancy - Horizontal Bar Chart
   try {
-    const occData = await fetchRoomOccupancy();
+    const occData = await fetchRoomOccupancy(reportFilters);
     const rooms = occData.data || [];
     
     const canvas = document.getElementById('room-occupancy-chart');
@@ -3123,7 +3302,7 @@ async function renderReports() {
 
   // Services cost - Polar Area Chart
   try {
-    const svcData = await fetchServicesCost();
+    const svcData = await fetchServicesCost(reportFilters);
     const services = svcData.data || [];
     
     const canvas = document.getElementById('services-cost-chart');
@@ -3176,9 +3355,10 @@ async function renderReports() {
 /* Section */
 async function renderUsers() {
   try {
-    const [usersData, auditData] = await Promise.allSettled([
+    const [usersData, auditData, settingsData] = await Promise.allSettled([
       fetchUsers(),
-      currentRole === 'admin' ? fetchAudit() : Promise.resolve({ history: [] })
+      currentRole === 'admin' ? fetchAudit() : Promise.resolve({ history: [] }),
+      currentRole === 'admin' ? fetchSettings() : Promise.resolve({ settings: {} })
     ]);
     if (usersData.status === 'fulfilled') {
       DATA.users = usersData.value.users || [];
@@ -3186,6 +3366,7 @@ async function renderUsers() {
       showToast('Impossible de charger l’équipe pour le moment.', 'warning');
     }
     DATA.audit = auditData.status === 'fulfilled' ? (auditData.value.history || []) : [];
+    if (settingsData.status === 'fulfilled') fillSettingsForm(settingsData.value.settings || {});
   } catch (e) {
     if (!DATA.users.length) {
       showToast('Impossible de charger l’équipe pour le moment.', 'warning');
@@ -3196,6 +3377,28 @@ async function renderUsers() {
   renderUsersTable();
   renderAuditLog();
   enhanceInteractiveAccessibility(document.getElementById('page-users'));
+}
+
+function fillSettingsForm(settings) {
+  Object.entries(settings).forEach(([key, value]) => {
+    const input = document.getElementById(`setting-${key}`);
+    if (input) input.value = value || '';
+  });
+}
+
+async function saveSettings() {
+  try {
+    await updateSettings({
+      hotelName: document.getElementById('setting-hotelName').value,
+      invoicePaymentTermsDays: document.getElementById('setting-invoicePaymentTermsDays').value,
+      taxRate: document.getElementById('setting-taxRate').value,
+      contactEmail: document.getElementById('setting-contactEmail').value,
+      billingAddress: document.getElementById('setting-billingAddress').value
+    });
+    showToast('Paramètres enregistrés.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Erreur paramètres', 'error');
+  }
 }
 
 function renderUsersTable() {
@@ -3254,8 +3457,14 @@ function renderNotifPanel() {
 
 async function renderAllNotifications() {
   try {
-    const data = await fetchNotifications();
+    const [data, prefsData] = await Promise.all([fetchNotifications(), fetchNotifPreferences()]);
     DATA.notifications = data.notifications || [];
+    const prefs = prefsData.preferences || {};
+    document.getElementById('pref-email').checked = Number(prefs.emailEnabled ?? 1) === 1;
+    document.getElementById('pref-sms').checked = Number(prefs.smsEnabled || 0) === 1;
+    document.getElementById('pref-events').checked = Number(prefs.eventReminders ?? 1) === 1;
+    document.getElementById('pref-payments').checked = Number(prefs.paymentAlerts ?? 1) === 1;
+    document.getElementById('pref-services').checked = Number(prefs.serviceUpdates ?? 1) === 1;
   } catch (e) {}
 
   document.getElementById('all-notif-list').innerHTML = DATA.notifications.map(n => `
@@ -3266,6 +3475,21 @@ async function renderAllNotifications() {
     </div>
   `).join('') || '<div style="color:var(--text-muted);font-size:13px;padding:16px">Aucune notification</div>';
   enhanceInteractiveAccessibility(document.getElementById('page-notifications'));
+}
+
+async function saveNotificationPreferences() {
+  try {
+    await updateNotifPreferences({
+      emailEnabled: document.getElementById('pref-email').checked,
+      smsEnabled: document.getElementById('pref-sms').checked,
+      eventReminders: document.getElementById('pref-events').checked,
+      paymentAlerts: document.getElementById('pref-payments').checked,
+      serviceUpdates: document.getElementById('pref-services').checked
+    });
+    showToast('Préférences de notification enregistrées.', 'success');
+  } catch (err) {
+    showToast(err.message || 'Erreur préférences', 'error');
+  }
 }
 
 function getNotifIcon(type) {
@@ -3351,6 +3575,7 @@ async function openEventModal() {
   document.getElementById('ev-date').min = getTodayDateKey();
   document.getElementById('ev-date').value = getTodayDateKey();
   document.getElementById('ev-time').value = '09:00';
+  document.getElementById('ev-end-time').value = '11:00';
   document.getElementById('ev-budget').value = '';
   document.getElementById('ev-guests').value = '';
   document.getElementById('ev-organizer').value = '';
@@ -3364,6 +3589,7 @@ function buildEventPayload(status) {
   const name = document.getElementById('ev-name').value.trim();
   const date = document.getElementById('ev-date').value;
   const time = document.getElementById('ev-time').value || '09:00';
+  const endTime = document.getElementById('ev-end-time').value || '';
   const budgetRaw = document.getElementById('ev-budget').value;
   const guestsRaw = document.getElementById('ev-guests').value;
   const contact = document.getElementById('ev-contact').value.trim();
@@ -3374,6 +3600,8 @@ function buildEventPayload(status) {
   if (status !== 'Brouillon' && !date) return { error: 'La date est requise.' };
   if (date && !isValidDateKey(date)) return { error: 'La date est invalide.' };
   if (time && !isValidTimeValue(time)) return { error: 'L’heure de début est invalide.' };
+  if (endTime && !isValidTimeValue(endTime)) return { error: 'L’heure de fin est invalide.' };
+  if (time && endTime && timeToMinutes(endTime) <= timeToMinutes(time)) return { error: 'L’heure de fin doit être après l’heure de début.' };
   if (status !== 'Brouillon' && date && time && isPastDateTime(date, time)) {
     return { error: 'Impossible de créer un événement dans le passé.' };
   }
@@ -3386,6 +3614,7 @@ function buildEventPayload(status) {
     type: document.getElementById('ev-type').value,
     date,
     time,
+    endTime,
     duration: document.getElementById('ev-duration').value,
     budget,
     guests,
@@ -4044,8 +4273,13 @@ Object.assign(window, {
   selectRoom,
   doReserveRoom,
   confirmReservation,
+  openRoomAdminModal,
+  saveRoomAdmin,
+  removeRoomAdmin,
   openGuestModal,
   saveGuest,
+  openGuestCsvImport,
+  handleGuestCsvImport,
   filterEvents,
   filterEventStatus,
   filterGuests,
@@ -4054,6 +4288,9 @@ Object.assign(window, {
   requestService,
   saveServiceRequest,
   validateService,
+  openCatalogServiceModal,
+  saveCatalogService,
+  removeCatalogService,
   viewInvoice,
   sendInvoiceToClient,
   doPayInvoice,
@@ -4061,10 +4298,13 @@ Object.assign(window, {
   openUserModal,
   saveUser,
   deleteUser,
+  saveSettings,
   showToast,
   renderAllNotifications,
+  saveNotificationPreferences,
   markRead,
   markAllRead,
+  getReportFilters,
   toggleChat,
   chatSuggest,
   sendChat

@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const nodemailer = require('nodemailer');
+const XLSX = require('xlsx');
 const { Server } = require('socket.io');
 const { createTelegramConcierge } = require('./concierge-telegram');
 
@@ -32,6 +33,17 @@ const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
+const DEFAULT_SERVICE_CATALOG = [
+  { name: 'Traiteur Gastronomique', type: 'Restauration', icon: '🍽️', desc: 'Menu 5 services, buffet ou plats servis à table', priceFrom: 45 },
+  { name: 'Audiovisuel Premium', type: 'Audiovisuel', icon: '🎛️', desc: 'Sono, projecteurs, écrans LED, éclairage scénique', priceFrom: 800 },
+  { name: 'Sécurité & Accueil', type: 'Sécurité', icon: '🛡️', desc: 'Agents de sécurité et personnel d’accueil événementiel', priceFrom: 240 },
+  { name: 'Décoration & Fleurs', type: 'Décoration', icon: '🌸', desc: 'Décoration thématique complète et arrangements floraux', priceFrom: 600 },
+  { name: 'Photographie', type: 'Photo', icon: '📷', desc: 'Photographe professionnel pour toute durée', priceFrom: 400 },
+  { name: 'Animation & DJ', type: 'Animation', icon: '🎵', desc: 'DJ professionnel ou groupe musical live', priceFrom: 750 },
+  { name: 'Transport VIP', type: 'Transport', icon: '🚘', desc: 'Service de limousine ou navette pour invités', priceFrom: 300 },
+  { name: 'Bar & Cocktails', type: 'Bar', icon: '🍸', desc: 'Barman + sélection de vins, spiritueux et mocktails', priceFrom: 500 },
+  { name: 'Signalisation', type: 'Logistique', icon: '🪧', desc: 'Affiches, bannières et signalétique personnalisée', priceFrom: 200 }
+];
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -421,6 +433,17 @@ function initializeDatabase() {
       updatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
+    db.run(`CREATE TABLE IF NOT EXISTS service_catalog (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT,
+      icon TEXT,
+      description TEXT,
+      priceFrom REAL DEFAULT 0,
+      active INTEGER DEFAULT 1,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
     db.run(`ALTER TABLE guests ADD COLUMN userId INTEGER`, () => { });
     db.run(`ALTER TABLE services ADD COLUMN userId INTEGER`, () => { });
     db.run(`ALTER TABLE reservations ADD COLUMN userId INTEGER`, () => { });
@@ -430,6 +453,27 @@ function initializeDatabase() {
     db.run(`UPDATE services SET userId = (SELECT userId FROM events e WHERE e.id = services.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
     db.run(`UPDATE reservations SET userId = (SELECT userId FROM events e WHERE e.id = reservations.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
     db.run(`UPDATE invoices SET userId = (SELECT userId FROM events e WHERE e.id = invoices.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
+
+    db.get('SELECT COUNT(*) as count FROM service_catalog', (err, row) => {
+      if (!err && row && row.count === 0) {
+        DEFAULT_SERVICE_CATALOG.forEach((service) => {
+          db.run(
+            'INSERT INTO service_catalog (name, type, icon, description, priceFrom, active) VALUES (?,?,?,?,?,1)',
+            [service.name, service.type, service.icon, service.desc, service.priceFrom]
+          );
+        });
+      }
+    });
+
+    const defaultSettings = [
+      ['hotelName', 'Hôtel La Promenade'],
+      ['billingAddress', '123 Avenue La Promenade, Montréal, QC H3X 1A1'],
+      ['taxRate', String(TAX_RATE)],
+      ['invoicePaymentTermsDays', '30']
+    ];
+    defaultSettings.forEach(([key, value]) => {
+      db.run('INSERT OR IGNORE INTO app_settings (key, value) VALUES (?,?)', [key, value]);
+    });
 
     const upsertLocalUser = (fname, lname, email, role, plainPassword) => {
       const hashedPassword = bcrypt.hashSync(plainPassword, 10);
@@ -1158,7 +1202,7 @@ app.post('/api/events', verifyToken, async (req, res) => {
     emitRealtimeEvent('event:created', { id: result.lastID, name, type, date, status, userId: ownerId });
     res.status(201).json({ id: result.lastID, message: 'Événement créé' });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
   }
 });
 
@@ -1187,7 +1231,7 @@ app.put('/api/events/:id', verifyToken, async (req, res) => {
     emitRealtimeEvent('event:updated', { id: parseInt(req.params.id), name, type, date, status, userId: ownerId });
     res.json({ message: 'Événement modifié' });
   } catch (e) {
-    res.status(500).json({ error: 'Erreur serveur' });
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
   }
 });
 
@@ -1536,15 +1580,13 @@ app.delete('/api/guests/:id', verifyToken, async (req, res) => {
   }
 });
 
-// CSV IMPORT
+// CSV / Excel IMPORT
 app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'Fichier CSV requis' });
-    const content = fs.readFileSync(req.file.path, 'utf-8');
-    const lines = content.split('\n').filter(l => l.trim());
-    if (lines.length < 2) return res.status(400).json({ error: 'Fichier CSV vide' });
+    if (!req.file) return res.status(400).json({ error: 'Fichier CSV ou Excel requis' });
+    const rows = parseUploadedGuestRows(req.file);
+    if (!rows.length) return res.status(400).json({ error: 'Fichier invité vide ou illisible' });
 
-    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
     let imported = 0;
     let skipped = 0;
     const eventId = req.body.eventId || null;
@@ -1562,15 +1604,18 @@ app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, r
       ownerId = event.userId;
     }
 
-    for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+    for (const rawRow of rows) {
       const row = {};
-      headers.forEach((h, idx) => { row[h] = values[idx] || ''; });
-
-      const fname = row['prenom'] || row['fname'] || row['prénom'] || values[0] || '';
-      const lname = row['nom'] || row['lname'] || values[1] || '';
+      Object.entries(rawRow).forEach(([key, value]) => {
+        row[String(key).trim().toLowerCase()] = normalizeText(value);
+      });
+      const values = rawRow.__values || Object.values(rawRow).map(normalizeText);
+      const fname = row['prenom'] || row['fname'] || row['prénom'] || row['first name'] || values[0] || '';
+      const lname = row['nom'] || row['lname'] || row['last name'] || values[1] || '';
       const email = row['email'] || row['courriel'] || values[2] || '';
       const phone = row['telephone'] || row['phone'] || row['téléphone'] || values[3] || '';
+      const status = cleanStatus(row['statut'] || row['status'], GUEST_STATUSES, 'En attente') || 'En attente';
+      const notes = row['notes'] || row['note'] || '';
 
       if (fname && lname && (!email || isValidEmail(email))) {
         if (email && eventId) {
@@ -1581,8 +1626,8 @@ app.post('/api/guests/import', verifyToken, upload.single('file'), async (req, r
           }
         }
         await dbRun(
-          'INSERT INTO guests (fname, lname, email, phone, eventId, userId) VALUES (?,?,?,?,?,?)',
-          [fname, lname, email, phone, eventId, ownerId]
+          'INSERT INTO guests (fname, lname, email, phone, eventId, userId, status, notes) VALUES (?,?,?,?,?,?,?,?)',
+          [fname, lname, email, phone, eventId, ownerId, status, notes]
         );
         imported++;
       } else {
@@ -1642,11 +1687,27 @@ app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
       return res.status(400).json({ error: 'Impossible d’envoyer une invitation pour un événement déjà passé' });
     }
 
-    // Mock email — in production, use nodemailer
-    console.log(`[MOCK EMAIL] To: ${guest.email} - Invitation à "${guest.eventName}" le ${guest.date} à ${guest.time}`);
+    const customMessage = normalizeText(req.body.message || req.body.customMessage);
+    const subject = normalizeText(req.body.subject) || `Invitation - ${guest.eventName || 'Hôtel La Promenade'}`;
+    const invitationText = customMessage || `Bonjour ${guest.fname}, vous êtes invité à "${guest.eventName}" le ${guest.date} à ${guest.time}.`;
+    try {
+      if (GMAIL_USER && GMAIL_APP_PASS) {
+        const transporter = getMailTransporter();
+        await transporter.sendMail({
+          from: `"${HOTEL_BILLING_FROM_NAME}" <${GMAIL_USER}>`,
+          to: guest.email,
+          subject,
+          text: invitationText
+        });
+      } else {
+        console.log(`[MOCK EMAIL] To: ${guest.email} - ${subject} - ${invitationText}`);
+      }
+    } catch (mailError) {
+      console.warn('Invitation email failed, keeping mock success:', mailError.message);
+    }
 
     await dbRun('UPDATE guests SET status = ? WHERE id = ?', ['Invité', req.params.id]);
-    await logAudit(req.userId, 'INVITE', 'guests', req.params.id, `Invitation envoyée à ${guest.email}`);
+    await logAudit(req.userId, 'INVITE', 'guests', req.params.id, `Invitation envoyée à ${guest.email}${customMessage ? ' avec message personnalisé' : ''}`);
     res.json({ message: `Invitation envoyée à ${guest.fname} ${guest.lname} (${guest.email})` });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -1656,6 +1717,64 @@ app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
 // --------------------------------------------------
 // SERVICES API
 // --------------------------------------------------
+
+app.get('/api/service-catalog', verifyToken, async (req, res) => {
+  try {
+    const includeInactive = req.userRole === 'admin' && req.query.includeInactive === '1';
+    const services = await dbAll(
+      `SELECT id, name, type, icon, description, priceFrom, active FROM service_catalog${includeInactive ? '' : ' WHERE active = 1'} ORDER BY name`
+    );
+    res.json({ services });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
+  }
+});
+
+app.post('/api/service-catalog', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const validation = validateCatalogServiceInput(req.body);
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, icon, description, priceFrom, active } = validation.value;
+    const result = await dbRun(
+      'INSERT INTO service_catalog (name, type, icon, description, priceFrom, active) VALUES (?,?,?,?,?,?)',
+      [name, type, icon, description, priceFrom, active]
+    );
+    await logAudit(req.userId, 'CREATE', 'service_catalog', result.lastID, `Service catalogue créé: ${name}`);
+    res.status(201).json({ id: result.lastID, message: 'Service catalogue créé' });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
+  }
+});
+
+app.put('/api/service-catalog/:id', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const existing = await dbGet('SELECT * FROM service_catalog WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Service catalogue non trouvé' });
+    const validation = validateCatalogServiceInput({ ...existing, ...req.body });
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, icon, description, priceFrom, active } = validation.value;
+    await dbRun(
+      'UPDATE service_catalog SET name=?, type=?, icon=?, description=?, priceFrom=?, active=? WHERE id=?',
+      [name, type, icon, description, priceFrom, active, req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'service_catalog', req.params.id, `Service catalogue modifié: ${name}`);
+    res.json({ message: 'Service catalogue modifié' });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/service-catalog/:id', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const existing = await dbGet('SELECT * FROM service_catalog WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Service catalogue non trouvé' });
+    await dbRun('UPDATE service_catalog SET active = 0 WHERE id = ?', [req.params.id]);
+    await logAudit(req.userId, 'DELETE', 'service_catalog', req.params.id, `Service catalogue désactivé: ${existing.name}`);
+    res.json({ message: 'Service catalogue désactivé' });
+  } catch (e) {
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
+  }
+});
 
 app.get('/api/services', verifyToken, async (req, res) => {
   try {
@@ -1824,15 +1943,35 @@ app.get('/api/devis/:eventId', verifyToken, async (req, res) => {
 
 app.get('/api/invoices', verifyToken, async (req, res) => {
   try {
+    await markOverdueInvoices();
+    const { eventId, status, from, to } = req.query;
     let sql = `
       SELECT i.*, e.name as eventName, e.contact as eventContact
       FROM invoices i LEFT JOIN events e ON i.eventId = e.id
     `;
     const params = [];
+    const filters = [];
     if (!isFinanceRole(req.userRole)) {
-      sql += ' WHERE i.userId = ? OR e.userId = ?';
+      filters.push('(i.userId = ? OR e.userId = ?)');
       params.push(req.userId, req.userId);
     }
+    if (eventId) {
+      filters.push('i.eventId = ?');
+      params.push(eventId);
+    }
+    if (status) {
+      filters.push('i.status = ?');
+      params.push(normalizeStatusAlias(status));
+    }
+    if (from && isValidDateString(from)) {
+      filters.push('i.issueDate >= ?');
+      params.push(from);
+    }
+    if (to && isValidDateString(to)) {
+      filters.push('i.issueDate <= ?');
+      params.push(to);
+    }
+    if (filters.length) sql += ` WHERE ${filters.join(' AND ')}`;
     sql += ' ORDER BY i.dateCreated DESC';
     const invoices = await dbAll(sql, params);
     res.json({ invoices });
@@ -1864,7 +2003,9 @@ app.post('/api/invoices/generate/:eventId', verifyToken, async (req, res) => {
     const now = new Date();
     const number = `INV-${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${req.params.eventId}`;
     const issueDate = now.toISOString().split('T')[0];
-    const due = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+    const termsSetting = await dbGet("SELECT value FROM app_settings WHERE key = 'invoicePaymentTermsDays'");
+    const termsDays = Math.max(parseInt(termsSetting?.value || '30', 10) || 30, 1);
+    const due = new Date(now.getTime() + termsDays * 24 * 60 * 60 * 1000);
     const dueDate = due.toISOString().split('T')[0];
 
     const result = await dbRun(
@@ -2255,6 +2396,37 @@ app.put('/api/notification-preferences', verifyToken, async (req, res) => {
   }
 });
 
+app.get('/api/settings', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const rows = await dbAll('SELECT key, value, updatedAt FROM app_settings ORDER BY key');
+    const settings = {};
+    rows.forEach((row) => { settings[row.key] = row.value; });
+    res.json({ settings, rows });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/settings', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const allowed = new Set(['hotelName', 'billingAddress', 'taxRate', 'invoicePaymentTermsDays', 'contactEmail', 'contactPhone']);
+    const entries = Object.entries(req.body || {}).filter(([key]) => allowed.has(key));
+    if (!entries.length) return res.status(400).json({ error: 'Aucun paramètre valide à mettre à jour' });
+    for (const [key, rawValue] of entries) {
+      const value = normalizeText(rawValue);
+      await dbRun(
+        `INSERT INTO app_settings (key, value, updatedAt) VALUES (?,?,CURRENT_TIMESTAMP)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updatedAt=CURRENT_TIMESTAMP`,
+        [key, value]
+      );
+    }
+    await logAudit(req.userId, 'UPDATE', 'app_settings', null, `Paramètres modifiés: ${entries.map(([key]) => key).join(', ')}`);
+    res.json({ message: 'Paramètres mis à jour' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // --------------------------------------------------
 // USERS API (admin)
 // --------------------------------------------------
@@ -2349,6 +2521,7 @@ app.get('/api/audit', verifyToken, requireRole('admin'), async (req, res) => {
 
 app.get('/api/reports/summary', verifyToken, async (req, res) => {
   try {
+    await markOverdueInvoices();
     let totalEvents;
     let activeEvents;
     let totalGuests;
@@ -2435,18 +2608,36 @@ function hasGlobalReportAccess(role) {
   return role === 'admin' || role === 'compta' || role === 'coordonnateur';
 }
 
-function reportOwnerFilter(req, alias = '') {
-  if (hasGlobalReportAccess(req.userRole)) return { clause: '', params: [] };
+function reportOwnerFilter(req, alias = '', options = {}) {
+  const filters = [];
+  const params = [];
   const prefix = alias ? `${alias}.` : '';
-  return { clause: ` WHERE ${prefix}userId = ?`, params: [req.userId] };
+  if (!hasGlobalReportAccess(req.userRole)) {
+    filters.push(`${prefix}userId = ?`);
+    params.push(req.userId);
+  }
+  if (options.dateColumn) {
+    const dateFilters = buildDateFilters(req.query, alias, options.dateColumn);
+    filters.push(...dateFilters.filters);
+    params.push(...dateFilters.params);
+  }
+  if (options.eventId && req.query.eventId) {
+    filters.push(`${prefix}eventId = ?`);
+    params.push(req.query.eventId);
+  }
+  if (options.type && req.query.type) {
+    filters.push(`${prefix}type = ?`);
+    params.push(normalizeText(req.query.type));
+  }
+  return { clause: filters.length ? ` WHERE ${filters.join(' AND ')}` : '', params };
 }
 
 async function buildReportSnapshot(req) {
-  const eventFilter = reportOwnerFilter(req, 'e');
-  const invoiceFilter = reportOwnerFilter(req, 'i');
-  const serviceFilter = reportOwnerFilter(req, 's');
-  const guestFilter = reportOwnerFilter(req, 'g');
-  const reservationFilter = reportOwnerFilter(req, 'r');
+  const eventFilter = reportOwnerFilter(req, 'e', { dateColumn: 'date', type: true });
+  const invoiceFilter = reportOwnerFilter(req, 'i', { dateColumn: 'issueDate', eventId: true });
+  const serviceFilter = reportOwnerFilter(req, 's', { eventId: true });
+  const guestFilter = reportOwnerFilter(req, 'g', { eventId: true });
+  const reservationFilter = reportOwnerFilter(req, 'r', { dateColumn: 'date', eventId: true });
 
   const [events, guests, invoices, services, reservations] = await Promise.all([
     dbGet(`SELECT COUNT(*) as total, SUM(CASE WHEN status NOT IN ('Annulé','Terminé') THEN 1 ELSE 0 END) as active FROM events e${eventFilter.clause}`, eventFilter.params),
@@ -2484,9 +2675,87 @@ async function buildReportSnapshot(req) {
   };
 }
 
+function validateRoomInput(payload) {
+  const name = normalizeText(payload.name);
+  const type = normalizeText(payload.type || 'Salle');
+  const capacity = toNonNegativeInteger(payload.capacity, 0);
+  const hourlyRate = toNonNegativeNumber(payload.hourlyRate, 0);
+  const features = Array.isArray(payload.features)
+    ? payload.features.map(normalizeText).filter(Boolean).join(',')
+    : normalizeText(payload.features);
+  const available = payload.available === false || payload.available === 0 || payload.available === '0' ? 0 : 1;
+
+  if (!name) return { error: 'Nom de salle requis' };
+  if (capacity === null || capacity <= 0) return { error: 'La capacité doit être supérieure à zéro' };
+  if (hourlyRate === null) return { error: 'Le tarif horaire doit être positif ou zéro' };
+
+  return { value: { name, type, capacity, hourlyRate, features, available } };
+}
+
+function validateCatalogServiceInput(payload) {
+  const name = normalizeText(payload.name);
+  const type = normalizeText(payload.type || name);
+  const icon = normalizeText(payload.icon || '•');
+  const description = normalizeText(payload.description || payload.desc);
+  const priceFrom = toNonNegativeNumber(payload.priceFrom, 0);
+  const active = payload.active === false || payload.active === 0 || payload.active === '0' ? 0 : 1;
+
+  if (!name) return { error: 'Nom du service catalogue requis' };
+  if (priceFrom === null) return { error: 'Le tarif du service doit être positif ou zéro' };
+
+  return { value: { name, type, icon, description, priceFrom, active } };
+}
+
+function parseUploadedGuestRows(file) {
+  const ext = path.extname(file.originalname || file.filename || '').toLowerCase();
+  if (ext === '.xlsx' || ext === '.xls') {
+    const workbook = XLSX.readFile(file.path);
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) return [];
+    return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+  }
+
+  const content = fs.readFileSync(file.path, 'utf-8');
+  const lines = content.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+  return lines.slice(1).map((line) => {
+    const values = line.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = values[idx] || ''; });
+    row.__values = values;
+    return row;
+  });
+}
+
+async function markOverdueInvoices() {
+  const today = getZonedNow().date;
+  await dbRun(
+    "UPDATE invoices SET status = 'En retard' WHERE status IN ('En attente','Partiel') AND dueDate IS NOT NULL AND dueDate < ?",
+    [today]
+  );
+}
+
+function buildDateFilters(query = {}, alias = '', column = 'date') {
+  const filters = [];
+  const params = [];
+  const prefix = alias ? `${alias}.` : '';
+  const from = normalizeText(query.from || query.startDate);
+  const to = normalizeText(query.to || query.endDate);
+  if (from && isValidDateString(from)) {
+    filters.push(`${prefix}${column} >= ?`);
+    params.push(from);
+  }
+  if (to && isValidDateString(to)) {
+    filters.push(`${prefix}${column} <= ?`);
+    params.push(to);
+  }
+  return { filters, params };
+}
+
 app.get('/api/reports/events-by-type', verifyToken, async (req, res) => {
   try {
-    const filter = reportOwnerFilter(req);
+    const filter = reportOwnerFilter(req, '', { dateColumn: 'date', type: true });
     const data = await dbAll(`SELECT type, COUNT(*) as count FROM events${filter.clause} GROUP BY type ORDER BY count DESC`, filter.params);
     res.json({ data });
   } catch (e) {
@@ -2494,9 +2763,62 @@ app.get('/api/reports/events-by-type', verifyToken, async (req, res) => {
   }
 });
 
+app.post('/api/rooms', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const validation = validateRoomInput(req.body);
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, capacity, hourlyRate, features, available } = validation.value;
+    const result = await dbRun(
+      'INSERT INTO rooms (name, type, capacity, hourlyRate, features, available) VALUES (?,?,?,?,?,?)',
+      [name, type, capacity, hourlyRate, features, available]
+    );
+    await logAudit(req.userId, 'CREATE', 'rooms', result.lastID, `Salle créée: ${name}`);
+    res.status(201).json({ id: result.lastID, message: 'Salle créée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.put('/api/rooms/:id', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const existing = await dbGet('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Salle non trouvée' });
+    const validation = validateRoomInput({ ...existing, ...req.body });
+    if (validation.error) return res.status(400).json({ error: validation.error });
+    const { name, type, capacity, hourlyRate, features, available } = validation.value;
+    await dbRun(
+      'UPDATE rooms SET name=?, type=?, capacity=?, hourlyRate=?, features=?, available=? WHERE id=?',
+      [name, type, capacity, hourlyRate, features, available, req.params.id]
+    );
+    await logAudit(req.userId, 'UPDATE', 'rooms', req.params.id, `Salle modifiée: ${name}`);
+    res.json({ message: 'Salle modifiée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.delete('/api/rooms/:id', verifyToken, requireRole('admin'), async (req, res) => {
+  try {
+    const existing = await dbGet('SELECT * FROM rooms WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Salle non trouvée' });
+    const activeReservation = await dbGet("SELECT id FROM reservations WHERE roomId = ? AND status != 'Annulé' LIMIT 1", [req.params.id]);
+    if (activeReservation) {
+      await dbRun('UPDATE rooms SET available = 0 WHERE id = ?', [req.params.id]);
+      await logAudit(req.userId, 'UPDATE', 'rooms', req.params.id, `Salle désactivée: ${existing.name}`);
+      return res.json({ message: 'Salle désactivée car elle possède un historique de réservation' });
+    }
+    await dbRun('DELETE FROM rooms WHERE id = ?', [req.params.id]);
+    await logAudit(req.userId, 'DELETE', 'rooms', req.params.id, `Salle supprimée: ${existing.name}`);
+    res.json({ message: 'Salle supprimée' });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 app.get('/api/reports/revenue-by-month', verifyToken, async (req, res) => {
   try {
-    const filter = reportOwnerFilter(req);
+    await markOverdueInvoices();
+    const filter = reportOwnerFilter(req, '', { dateColumn: 'issueDate', eventId: true });
     const data = await dbAll(`
       SELECT strftime('%Y-%m', paidDate) as month, SUM(total) as revenue
       FROM invoices${filter.clause ? `${filter.clause} AND` : ' WHERE'} status = 'Payée' AND paidDate IS NOT NULL
@@ -2510,14 +2832,27 @@ app.get('/api/reports/revenue-by-month', verifyToken, async (req, res) => {
 
 app.get('/api/reports/room-occupancy', verifyToken, async (req, res) => {
   try {
-    const ownedJoin = hasGlobalReportAccess(req.userRole) ? '' : ' AND r.userId = ?';
+    const filters = [];
+    const params = [];
+    if (!hasGlobalReportAccess(req.userRole)) {
+      filters.push('r.userId = ?');
+      params.push(req.userId);
+    }
+    const dateFilters = buildDateFilters(req.query, 'r', 'date');
+    filters.push(...dateFilters.filters);
+    params.push(...dateFilters.params);
+    if (req.query.eventId) {
+      filters.push('r.eventId = ?');
+      params.push(req.query.eventId);
+    }
+    const ownedJoin = filters.length ? ` AND ${filters.join(' AND ')}` : '';
     const data = await dbAll(`
       SELECT rm.name, rm.capacity,
         COUNT(r.id) as totalReservations,
         SUM(CASE WHEN r.status = 'Confirmé' THEN 1 ELSE 0 END) as confirmed
       FROM rooms rm LEFT JOIN reservations r ON rm.id = r.roomId${ownedJoin}
       GROUP BY rm.id
-    `, hasGlobalReportAccess(req.userRole) ? [] : [req.userId]);
+    `, params);
     res.json({ data });
   } catch (e) {
     res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Erreur serveur' });
@@ -2526,7 +2861,7 @@ app.get('/api/reports/room-occupancy', verifyToken, async (req, res) => {
 
 app.get('/api/reports/services-cost', verifyToken, async (req, res) => {
   try {
-    const filter = reportOwnerFilter(req);
+    const filter = reportOwnerFilter(req, '', { eventId: true });
     const data = await dbAll(`
       SELECT name, SUM(cost) as totalCost, COUNT(*) as count
       FROM services${filter.clause} GROUP BY name ORDER BY totalCost DESC
