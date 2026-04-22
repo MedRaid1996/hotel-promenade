@@ -120,7 +120,8 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
   } else {
     console.log('Connected to SQLite database');
     initializeDatabase();
-    waitForDatabaseReady().then(() => {
+    waitForDatabaseReady().then(async () => {
+      await syncLocalLoginUsers();
       appReady = true;
       resolveAppReady();
       console.log('Application initialization complete');
@@ -149,6 +150,34 @@ function dbAll(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => { if (err) reject(err); else resolve(rows || []); });
   });
+}
+
+async function syncLocalLoginUsers() {
+  const upsertUser = async (fname, lname, email, role, plainPassword) => {
+    if (!plainPassword) return;
+    const hashedPassword = bcrypt.hashSync(plainPassword, 10);
+    await dbRun(
+      `INSERT INTO users (fname, lname, email, password, role, status)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(email) DO UPDATE SET
+         fname=excluded.fname,
+         lname=excluded.lname,
+         password=excluded.password,
+         role=excluded.role,
+         status=excluded.status`,
+      [fname, lname, email, hashedPassword, role, 'Actif']
+    );
+  };
+
+  if (BOOTSTRAP_ADMIN_PASSWORD) {
+    await upsertUser('Admin', 'La Promenade', BOOTSTRAP_ADMIN_EMAIL, 'admin', BOOTSTRAP_ADMIN_PASSWORD);
+  }
+  if (SYNC_QUICK_LOGIN_USERS) {
+    await upsertUser('Luc', 'Bernard', 'organisateur@lapromenade.com', 'organisateur', DEMO_USER_PASSWORD);
+    await upsertUser('Emma', 'Côté', 'coordonnateur@lapromenade.com', 'coordonnateur', DEMO_USER_PASSWORD);
+    await upsertUser('Marc', 'Gagné', 'compta@lapromenade.com', 'compta', DEMO_USER_PASSWORD);
+    console.log('Quick-login users password sync complete');
+  }
 }
 
 async function waitForDatabaseReady(retries = 120, delayMs = 100) {
