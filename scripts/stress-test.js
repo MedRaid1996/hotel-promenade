@@ -142,7 +142,8 @@ async function main() {
   });
   assert.equal(rooms.response.status, 200);
   assert.ok(Array.isArray(rooms.body.rooms) && rooms.body.rooms.length > 0, 'Expected seeded rooms');
-  const room = rooms.body.rooms[0];
+  const room = rooms.body.rooms.find((candidate) => Number(candidate.capacity || 0) >= 120);
+  assert.ok(room, 'Expected at least one seeded room with capacity for 120 guests');
 
   const createEvent = await api('/api/events', {
     method: 'POST',
