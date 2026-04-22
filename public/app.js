@@ -1009,6 +1009,7 @@ const NAV_CONFIG = {
       {icon:'♟', label:'Invités', page:'guests'},
       {icon:'⊛', label:'Services', page:'services'},
       {icon:'◎', label:'Facturation', page:'billing'},
+      {icon:'⊡', label:'Rapports', page:'reports'},
       {icon:'◫', label:'Notifications', page:'notifications', badge: () => DATA.notifications.filter(n => !n.isRead).length},
     ]},
   ],
@@ -2846,7 +2847,7 @@ async function renderReports() {
         });
       } else {
         labels = monthNames;
-        values = [18000, 22000, 15000, 28000, 35000, 42000, 38000, 45000, 31000, 26000, 29000, 48000];
+        values = monthNames.map(() => 0);
       }
       
       const gradient = createGradient(ctx, colors.goldGradientStart, colors.goldGradientEnd);

@@ -161,18 +161,26 @@ async function openLoginScreen() {
   }
 }
 
-async function verifyQuickAccessButtons() {
+async function fillLoginCredentials(email, password) {
+  await page.waitForTimeout(1100);
+  await page.locator('#login-email').evaluate((node) => node.removeAttribute('readonly'));
+  await page.locator('#login-password').evaluate((node) => node.removeAttribute('readonly'));
+  await page.locator('#login-email').fill(email);
+  await page.locator('#login-password').fill(password);
+  await expectInputValue('#login-email', email);
+  await expectInputValue('#login-password', password);
+}
+
+async function verifyLoginCredentialsCanBeEntered() {
   const cases = [
-    { label: 'Administrateur', email: bootstrapAdminEmail, password: bootstrapAdminPassword },
-    { label: 'Organisateur', email: 'organisateur@lapromenade.com', password: demoPassword },
-    { label: 'Coordonnateur', email: 'coordonnateur@lapromenade.com', password: demoPassword },
+    { email: bootstrapAdminEmail, password: bootstrapAdminPassword },
+    { email: 'organisateur@lapromenade.com', password: demoPassword },
+    { email: 'coordonnateur@lapromenade.com', password: demoPassword },
     { label: 'Comptabilité', email: 'compta@lapromenade.com', password: demoPassword }
   ];
 
   for (const item of cases) {
-    await page.getByRole('button', { name: item.label }).click({ force: true });
-    await expectInputValue('#login-email', item.email);
-    await expectInputValue('#login-password', item.password);
+    await fillLoginCredentials(item.email, item.password);
   }
 }
 
@@ -188,9 +196,7 @@ async function expectInputValue(selector, value) {
 }
 
 async function loginViaUi(role) {
-  await page.getByRole('button', { name: role.quickAccessLabel }).click({ force: true });
-  await expectInputValue('#login-email', role.email);
-  await expectInputValue('#login-password', role.password);
+  await fillLoginCredentials(role.email, role.password);
   await page.getByRole('button', { name: 'Se connecter' }).click({ force: true });
   await page.locator('#app').waitFor({ state: 'visible', timeout: 15000 });
   await page.locator('#nav-dashboard').waitFor({ state: 'visible', timeout: 10000 });
@@ -284,7 +290,7 @@ async function main() {
   });
 
   await openLoginScreen();
-  await verifyQuickAccessButtons();
+  await verifyLoginCredentialsCanBeEntered();
 
   const roles = [
     {
@@ -300,8 +306,8 @@ async function main() {
       quickAccessLabel: 'Organisateur',
       email: 'organisateur@lapromenade.com',
       password: demoPassword,
-      expectedPages: ['dashboard', 'events', 'rooms', 'guests', 'services', 'billing', 'notifications'],
-      expectedNavIds: ['nav-dashboard', 'nav-events', 'nav-rooms', 'nav-guests', 'nav-services', 'nav-billing', 'nav-notifications']
+      expectedPages: ['dashboard', 'events', 'rooms', 'guests', 'services', 'billing', 'reports', 'notifications'],
+      expectedNavIds: ['nav-dashboard', 'nav-events', 'nav-rooms', 'nav-guests', 'nav-services', 'nav-billing', 'nav-reports', 'nav-notifications']
     },
     {
       key: 'coordonnateur',

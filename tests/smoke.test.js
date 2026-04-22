@@ -292,6 +292,26 @@ test('payments and reports are scoped to the owner', async () => {
   assert.equal(otherSummary.response.status, 200);
   assert.equal(otherSummary.body.events.total, 0);
   assert.equal(otherSummary.body.revenue.paid, 0);
+
+  const ownerEventsByType = await api('/api/reports/events-by-type', {
+    headers: { 'Authorization': `Bearer ${ownerToken}` }
+  });
+  assert.equal(ownerEventsByType.response.status, 200);
+  assert.equal(ownerEventsByType.body.data.length, 1);
+  assert.equal(ownerEventsByType.body.data[0].type, 'Gala');
+
+  const otherEventsByType = await api('/api/reports/events-by-type', {
+    headers: { 'Authorization': `Bearer ${otherToken}` }
+  });
+  assert.equal(otherEventsByType.response.status, 200);
+  assert.equal(otherEventsByType.body.data.length, 0);
+
+  const reportCsv = await api('/api/reports/export.csv', {
+    headers: { 'Authorization': `Bearer ${ownerToken}` }
+  });
+  assert.equal(reportCsv.response.status, 200);
+  assert.match(reportCsv.body, /Participation/);
+  assert.match(reportCsv.body, /Coût final/);
 });
 
 test('audit log is admin-only and available to administrators', async () => {

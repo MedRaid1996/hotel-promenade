@@ -4377,6 +4377,17 @@ button {
 
         <!-- RAPPORTS -->
         <div id="page-reports" class="page">
+          <div class="section-header" style="margin-bottom:20px">
+            <div>
+              <div class="section-eyebrow">Post-événement</div>
+              <h3 style="margin:0">Rapports analytiques</h3>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-sm" onclick="downloadReportCsv()">↓ Export Excel/CSV</button>
+              <button class="btn btn-sm" onclick="downloadReportPdf()">📄 Export PDF</button>
+              <button class="btn btn-sm" onclick="window.print()">Version imprimable</button>
+            </div>
+          </div>
           <div class="grid-2" style="margin-bottom:20px">
             <div class="card">
               <div class="card-title">Revenus par mois (CAD)</div>

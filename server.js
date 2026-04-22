@@ -2406,50 +2406,156 @@ app.get('/api/reports/summary', verifyToken, async (req, res) => {
   }
 });
 
-app.get('/api/reports/events-by-type', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+function hasGlobalReportAccess(role) {
+  return role === 'admin' || role === 'compta' || role === 'coordonnateur';
+}
+
+function reportOwnerFilter(req, alias = '') {
+  if (hasGlobalReportAccess(req.userRole)) return { clause: '', params: [] };
+  const prefix = alias ? `${alias}.` : '';
+  return { clause: ` WHERE ${prefix}userId = ?`, params: [req.userId] };
+}
+
+async function buildReportSnapshot(req) {
+  const eventFilter = reportOwnerFilter(req, 'e');
+  const invoiceFilter = reportOwnerFilter(req, 'i');
+  const serviceFilter = reportOwnerFilter(req, 's');
+  const guestFilter = reportOwnerFilter(req, 'g');
+  const reservationFilter = reportOwnerFilter(req, 'r');
+
+  const [events, guests, invoices, services, reservations] = await Promise.all([
+    dbGet(`SELECT COUNT(*) as total, SUM(CASE WHEN status NOT IN ('Annulé','Terminé') THEN 1 ELSE 0 END) as active FROM events e${eventFilter.clause}`, eventFilter.params),
+    dbGet(`SELECT COUNT(*) as total, SUM(CASE WHEN status = 'Confirmé' THEN 1 ELSE 0 END) as confirmed FROM guests g${guestFilter.clause}`, guestFilter.params),
+    dbGet(`SELECT COALESCE(SUM(total),0) as finalCost, COALESCE(SUM(CASE WHEN status = 'Payée' THEN total ELSE 0 END),0) as paid, COUNT(*) as count FROM invoices i${invoiceFilter.clause}`, invoiceFilter.params),
+    dbGet(`SELECT COUNT(*) as count, COALESCE(SUM(cost),0) as consumptionCost FROM services s${serviceFilter.clause}`, serviceFilter.params),
+    dbGet(`SELECT COUNT(*) as count, COALESCE(SUM(cost),0) as roomCost FROM reservations r${reservationFilter.clause}`, reservationFilter.params)
+  ]);
+
+  return {
+    participation: {
+      invited: guests.total || 0,
+      confirmed: guests.confirmed || 0,
+      confirmationRate: guests.total ? Math.round((guests.confirmed || 0) * 10000 / guests.total) / 100 : 0
+    },
+    feedback: {
+      status: 'Non collecté dans un formulaire dédié',
+      note: 'Les notes des invités et services restent disponibles dans les modules opérationnels.'
+    },
+    consumption: {
+      servicesRequested: services.count || 0,
+      servicesCost: services.consumptionCost || 0,
+      roomReservations: reservations.count || 0,
+      roomCost: reservations.roomCost || 0
+    },
+    finalCost: {
+      invoiced: invoices.finalCost || 0,
+      paid: invoices.paid || 0,
+      invoiceCount: invoices.count || 0
+    },
+    events: {
+      total: events.total || 0,
+      active: events.active || 0
+    }
+  };
+}
+
+app.get('/api/reports/events-by-type', verifyToken, async (req, res) => {
   try {
-    const data = await dbAll('SELECT type, COUNT(*) as count FROM events GROUP BY type ORDER BY count DESC');
+    const filter = reportOwnerFilter(req);
+    const data = await dbAll(`SELECT type, COUNT(*) as count FROM events${filter.clause} GROUP BY type ORDER BY count DESC`, filter.params);
     res.json({ data });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
 
-app.get('/api/reports/revenue-by-month', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+app.get('/api/reports/revenue-by-month', verifyToken, async (req, res) => {
   try {
+    const filter = reportOwnerFilter(req);
     const data = await dbAll(`
       SELECT strftime('%Y-%m', paidDate) as month, SUM(total) as revenue
-      FROM invoices WHERE status = 'Payée' AND paidDate IS NOT NULL
+      FROM invoices${filter.clause ? `${filter.clause} AND` : ' WHERE'} status = 'Payée' AND paidDate IS NOT NULL
       GROUP BY month ORDER BY month
-    `);
+    `, filter.params);
     res.json({ data });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
 
-app.get('/api/reports/room-occupancy', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+app.get('/api/reports/room-occupancy', verifyToken, async (req, res) => {
   try {
+    const ownedJoin = hasGlobalReportAccess(req.userRole) ? '' : ' AND r.userId = ?';
     const data = await dbAll(`
       SELECT rm.name, rm.capacity,
         COUNT(r.id) as totalReservations,
         SUM(CASE WHEN r.status = 'Confirmé' THEN 1 ELSE 0 END) as confirmed
-      FROM rooms rm LEFT JOIN reservations r ON rm.id = r.roomId
+      FROM rooms rm LEFT JOIN reservations r ON rm.id = r.roomId${ownedJoin}
       GROUP BY rm.id
-    `);
+    `, hasGlobalReportAccess(req.userRole) ? [] : [req.userId]);
     res.json({ data });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
 
-app.get('/api/reports/services-cost', verifyToken, requireRole('admin', 'compta'), async (req, res) => {
+app.get('/api/reports/services-cost', verifyToken, async (req, res) => {
   try {
+    const filter = reportOwnerFilter(req);
     const data = await dbAll(`
       SELECT name, SUM(cost) as totalCost, COUNT(*) as count
-      FROM services GROUP BY name ORDER BY totalCost DESC
-    `);
+      FROM services${filter.clause} GROUP BY name ORDER BY totalCost DESC
+    `, filter.params);
     res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/reports/export.csv', verifyToken, async (req, res) => {
+  try {
+    const snapshot = await buildReportSnapshot(req);
+    const rows = [
+      ['Section', 'Indicateur', 'Valeur'],
+      ['Participation', 'Invités', snapshot.participation.invited],
+      ['Participation', 'Confirmés', snapshot.participation.confirmed],
+      ['Participation', 'Taux de confirmation', `${snapshot.participation.confirmationRate}%`],
+      ['Feedback', 'Statut', snapshot.feedback.status],
+      ['Consommation', 'Services demandés', snapshot.consumption.servicesRequested],
+      ['Consommation', 'Coût services', snapshot.consumption.servicesCost],
+      ['Consommation', 'Réservations de salles', snapshot.consumption.roomReservations],
+      ['Consommation', 'Coût salles', snapshot.consumption.roomCost],
+      ['Coût final', 'Montant facturé', snapshot.finalCost.invoiced],
+      ['Coût final', 'Montant payé', snapshot.finalCost.paid],
+      ['Événements', 'Total', snapshot.events.total],
+      ['Événements', 'Actifs', snapshot.events.active]
+    ];
+    const csv = rows.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename=rapport-evenements.csv');
+    res.send('\uFEFF' + csv);
+  } catch (e) {
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/reports/export.pdf', verifyToken, async (req, res) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const snapshot = await buildReportSnapshot(req);
+    const doc = new PDFDocument({ margin: 50 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename=rapport-evenements.pdf');
+    doc.pipe(res);
+    doc.fontSize(20).text('Rapport post-événement', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(12)
+      .text(`Événements: ${snapshot.events.total} au total, ${snapshot.events.active} actifs`)
+      .text(`Participation: ${snapshot.participation.confirmed}/${snapshot.participation.invited} confirmés (${snapshot.participation.confirmationRate}%)`)
+      .text(`Feedback: ${snapshot.feedback.status}`)
+      .text(`Consommation: ${snapshot.consumption.servicesRequested} services (${formatCad(snapshot.consumption.servicesCost)}) et ${snapshot.consumption.roomReservations} réservations de salles (${formatCad(snapshot.consumption.roomCost)})`)
+      .text(`Coût final: ${formatCad(snapshot.finalCost.invoiced)} facturés, ${formatCad(snapshot.finalCost.paid)} payés`);
+    doc.end();
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
@@ -3163,14 +3269,14 @@ async function runAutomationFallback(messages, userId, userRole) {
     toolName = 'get_notifications';
   } else if (/\b(rapport|statistique|revenu|dashboard|resume)\b/.test(text)) {
     toolName = 'get_report_summary';
-  } else if (/\b(salle|salles|room|rooms)\b/.test(text) && /\b(dispon|liste|montre|quell)\b/.test(text)) {
+  } else if (/\b(salle|salles|room|rooms)\b/.test(text) && /(disponib|liste|lister|affiche|afficher|montre|montrer|quelle|quelles|voir|salles)/.test(text)) {
     toolName = 'list_rooms';
     const capacityMatch = text.match(/(\d+)\s*(personnes|pers|invites)/);
     if (capacityMatch) args.capacity = capacityMatch[1];
-  } else if (/\b(evenement|evenements)\b/.test(text) && /\b(liste|montre|mes|quel)\b/.test(text)) {
+  } else if (/\b(evenement|evenements)\b/.test(text) && /(liste|lister|affiche|afficher|montre|montrer|mes|quel|quels|voir)/.test(text)) {
     toolName = 'list_events';
   } else if (/\bfacture\b/.test(text) && /\b(gener|cree)\b/.test(text)) {
-    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
     if (!eventIdMatch) {
       return { reply: 'Mode automatique: indiquez l identifiant de l événement pour générer la facture.', actions: [] };
     }
@@ -3180,7 +3286,7 @@ async function runAutomationFallback(messages, userId, userRole) {
     const roomIdMatch = text.match(/salle\s*(\d+)/);
     const dateMatch = raw.match(/\b\d{4}-\d{2}-\d{2}\b/);
     const times = raw.match(/\b\d{2}:\d{2}\b/g) || [];
-    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
     if (!roomIdMatch || !dateMatch || times.length < 2) {
       return { reply: 'Mode automatique: pour réserver une salle, indiquez la salle, la date et les heures de début et fin au format YYYY-MM-DD et HH:MM.', actions: [] };
     }
@@ -3195,7 +3301,7 @@ async function runAutomationFallback(messages, userId, userRole) {
   } else if (/\b(cree|creer|ajoute)\b/.test(text) && /\bevenement\b/.test(text)) {
     const dateMatch = raw.match(/\b\d{4}-\d{2}-\d{2}\b/);
     const times = raw.match(/\b\d{2}:\d{2}\b/g) || [];
-    const nameMatch = raw.match(/(:événement|evenement)\s+(.+)(:\s+le\s+\d{4}-\d{2}-\d{2}|$)/i);
+    const nameMatch = raw.match(/(?:événement|evenement|event)\s+(.+?)(?:\s+le\s+\d{4}-\d{2}-\d{2}|$)/i);
     if (!nameMatch) {
       return { reply: 'Mode automatique: donnez au moins le nom de l événement, par exemple "Créer un événement Gala Signature le 2026-05-20 à 18:00".', actions: [] };
     }
@@ -3207,7 +3313,7 @@ async function runAutomationFallback(messages, userId, userRole) {
       endTime: times[1]
     };
   } else if (/\b(service|traiteur|deco|decoration|dj|photo)\b/.test(text) && /\b(demande|ajoute|cree)\b/.test(text)) {
-    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
     if (!eventIdMatch) {
       return { reply: 'Mode automatique: indiquez l identifiant de l événement pour demander un service.', actions: [] };
     }
@@ -3217,7 +3323,7 @@ async function runAutomationFallback(messages, userId, userRole) {
       name: raw.replace(/.*(service|traiteur|décoration|decoration|dj|photo)/i, '$1').trim() || 'Service personnalisé'
     };
   } else if (/\binvite\b/.test(text) && /\b(ajoute|creer|cree)\b/.test(text)) {
-    const eventIdMatch = text.match(/(:evenement|event)\s*(\d+)/);
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
     const personMatch = raw.match(/invite\s+([A-Za-z' -]+)\s+([A-Za-z' -]+)(:\s+pour|\s+sur|\s+event|\s+evenement|$)/i);
     if (!eventIdMatch || !personMatch) {
       return { reply: 'Mode automatique: pour ajouter un invité, indiquez son prénom, son nom et l identifiant de l événement.', actions: [] };

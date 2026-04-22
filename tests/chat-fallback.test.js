@@ -89,6 +89,26 @@ test('chat falls back to automation without exposing quota or timeout language',
   assert.doesNotMatch(result.body.reply, /token|timeout|trop de temps|rate limit/i);
 });
 
+test('chat fallback executes French room listing requests without provider keys', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+
+  const result = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Lister les salles' }]
+    })
+  });
+
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.automated, true);
+  assert.match(result.body.reply, /Mode automatique activé/i);
+  assert.match(result.body.reply, /Salle Versailles|Grand Salon|Montréal/i);
+});
+
 test('chat returns a graceful rescue reply for non-automatable requests when providers are unavailable', async () => {
   const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
 

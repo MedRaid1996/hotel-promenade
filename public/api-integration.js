@@ -267,6 +267,30 @@ async function fetchRevenueByMonth() { return apiRequest('/reports/revenue-by-mo
 async function fetchRoomOccupancy() { return apiRequest('/reports/room-occupancy'); }
 async function fetchServicesCost() { return apiRequest('/reports/services-cost'); }
 
+async function downloadReportCsv() {
+  const blob = await apiRequest('/reports/export.csv');
+  if (blob instanceof Blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'rapport-evenements.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function downloadReportPdf() {
+  const blob = await apiRequest('/reports/export.pdf');
+  if (blob instanceof Blob) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'rapport-evenements.pdf';
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function sendChatMessage(messages) {
   return apiRequest('/chat', 'POST', { messages });
 }
@@ -325,6 +349,8 @@ Object.assign(window, {
   fetchRevenueByMonth,
   fetchRoomOccupancy,
   fetchServicesCost,
+  downloadReportCsv,
+  downloadReportPdf,
   sendChatMessage,
   syncAuthGlobals
 });
