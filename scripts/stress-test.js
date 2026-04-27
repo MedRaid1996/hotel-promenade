@@ -9,7 +9,7 @@ dotenv.config();
 
 const liveTelegram = process.env.LIVE_TELEGRAM_STRESS === 'true';
 const dbPath = path.join(os.tmpdir(), `hotel-promenade-stress-${Date.now()}.db`);
-const today = new Date().toISOString().slice(0, 10);
+const testEventDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 let telegramServer = null;
 let telegramCalls = [];
@@ -154,7 +154,7 @@ async function main() {
     body: JSON.stringify({
       name: 'Soiree Signature Stress',
       type: 'Gala',
-      date: today,
+      date: testEventDate,
       time: '19:00',
       endTime: '23:00',
       organizer: 'Equipe Stress',
@@ -175,7 +175,7 @@ async function main() {
     body: JSON.stringify({
       roomId: room.id,
       eventId,
-      date: today,
+      date: testEventDate,
       startTime: '19:00',
       endTime: '23:00'
     })
@@ -284,7 +284,7 @@ async function main() {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${adminToken}`
     },
-    body: JSON.stringify({ date: today })
+    body: JSON.stringify({ date: testEventDate })
   });
   assert.equal(debrief.response.status, 200, JSON.stringify(debrief.body));
   assert.ok(fs.existsSync(debrief.body.audioPath), 'Concierge audio was not generated');

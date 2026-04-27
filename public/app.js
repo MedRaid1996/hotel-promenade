@@ -1106,36 +1106,6 @@ function initLampParticles() {
   }
 }
 
-// Cursor-tracking circle
-function initCursorCircle() {
-  const circle = document.getElementById('cursor-circle');
-  if (!circle) return;
-  let mouseX = 0, mouseY = 0, circleX = 0, circleY = 0;
-  document.addEventListener('mousemove', e => {
-    mouseX = e.clientX;
-    mouseY = e.clientY;
-  });
-  function animate() {
-    circleX += (mouseX - circleX) * 0.15;
-    circleY += (mouseY - circleY) * 0.15;
-    circle.style.left = circleX + 'px';
-    circle.style.top = circleY + 'px';
-    requestAnimationFrame(animate);
-  }
-  animate();
-  // Grow circle on hovering interactive elements
-  document.addEventListener('mouseover', e => {
-    if (e.target.closest('button, a, input, select, textarea, .lamp-btn, .stat-card, .cal-day')) {
-      circle.classList.add('hovering');
-    }
-  });
-  document.addEventListener('mouseout', e => {
-    if (e.target.closest('button, a, input, select, textarea, .lamp-btn, .stat-card, .cal-day')) {
-      circle.classList.remove('hovering');
-    }
-  });
-}
-
 /* Section */
 async function doLogin() {
   const email = document.getElementById('login-email').value.trim().toLowerCase();
@@ -2231,6 +2201,14 @@ async function renderRooms() {
 
   const activeReservations = DATA.reservations.filter(isActiveReservation);
   document.querySelectorAll('.admin-only-control').forEach(el => { el.style.display = currentRole === 'admin' ? '' : 'none'; });
+  const availableRooms = DATA.rooms.filter(room => Number(room.available) !== 0 && !activeReservations.some(res => Number(res.roomId) === Number(room.id)));
+  const maxCapacity = DATA.rooms.reduce((max, room) => Math.max(max, Number(room.capacity || 0)), 0);
+  const roomsHeroTotal = document.getElementById('rooms-hero-total');
+  const roomsHeroFree = document.getElementById('rooms-hero-free');
+  const roomsHeroCapacity = document.getElementById('rooms-hero-capacity');
+  if (roomsHeroTotal) roomsHeroTotal.textContent = DATA.rooms.length;
+  if (roomsHeroFree) roomsHeroFree.textContent = availableRooms.length;
+  if (roomsHeroCapacity) roomsHeroCapacity.textContent = maxCapacity;
   const typeFilter = document.getElementById('room-type-filter');
   if (typeFilter) {
     const previous = typeFilter.value;
@@ -4021,7 +3999,6 @@ document.addEventListener('keydown', e => {
 // Auto-login if token exists (session restore)
 window.addEventListener('DOMContentLoaded', () => {
   initLampParticles();
-  initCursorCircle();
   enhanceInteractiveAccessibility(document);
   hardenLoginAutofill();
   if (TOKEN && CURRENT_USER) {

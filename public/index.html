@@ -1982,6 +1982,91 @@ table tbody tr:last-child td { border-bottom: none; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(201,168,76,0.4); }
 
 /* ── ROOM GRID ── */
+.rooms-hero {
+  position: relative;
+  overflow: hidden;
+  min-height: 178px;
+  margin-bottom: 18px;
+  padding: 26px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(90deg, rgba(13,13,13,0.88), rgba(13,13,13,0.52)),
+    url('https://images.unsplash.com/photo-1519167758481-83f550bb49b3?auto=format&fit=crop&w=1600&q=80') center/cover;
+}
+.rooms-hero-title {
+  margin: 0;
+  max-width: 760px;
+  font-family: 'Cormorant Garamond', serif;
+  font-size: clamp(30px, 4vw, 54px);
+  font-weight: 500;
+  color: #f8f2df;
+}
+.rooms-hero-copy {
+  margin: 8px 0 0;
+  max-width: 620px;
+  color: rgba(248,242,223,0.78);
+  line-height: 1.55;
+}
+.rooms-hero-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(88px, 1fr));
+  gap: 10px;
+  min-width: 320px;
+}
+.rooms-hero-metric {
+  padding: 12px;
+  border: 1px solid rgba(248,242,223,0.22);
+  background: rgba(0,0,0,0.32);
+  backdrop-filter: blur(10px);
+}
+.rooms-hero-metric strong {
+  display: block;
+  font-size: 22px;
+  color: var(--gold);
+}
+.rooms-hero-metric span {
+  display: block;
+  margin-top: 3px;
+  font-size: 11px;
+  color: rgba(248,242,223,0.7);
+}
+.room-filter-bar {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(130px, 0.55fr) minmax(200px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(201,168,76,0.08), rgba(255,255,255,0.025));
+}
+.room-filter-field {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0 10px;
+}
+.room-filter-icon {
+  color: var(--gold);
+  font-size: 14px;
+}
+.room-filter-field input,
+.room-filter-field select {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
 .room-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .room-card {
   border: 1px solid var(--border);
@@ -2008,6 +2093,9 @@ table tbody tr:last-child td { border-bottom: none; }
   .role-spotlight-metrics { grid-template-columns: 1fr; }
   .quick-action-grid { grid-template-columns: 1fr; }
   .audit-toolbar { grid-template-columns: 1fr; }
+  .rooms-hero { grid-template-columns: 1fr; }
+  .rooms-hero-metrics { min-width: 0; }
+  .room-filter-bar { grid-template-columns: 1fr 1fr; }
   .topbar { align-items: flex-start; }
   .topbar-actions { flex-wrap: wrap; justify-content: flex-end; }
   .topbar-atmosphere { width: 100%; min-width: 0; order: -1; }
@@ -2356,24 +2444,6 @@ table tbody tr:last-child td { border-bottom: none; }
   100% { opacity: 1; }
 }
 
-/* Cursor-tracking circle */
-.cursor-circle {
-  position: fixed;
-  width: 32px;
-  height: 32px;
-  border: 1px solid rgba(201,168,76,0.4);
-  border-radius: 50%;
-  pointer-events: none;
-  z-index: 9999;
-  transform: translate(-50%, -50%);
-  transition: transform 0.15s ease-out, width 0.2s, height 0.2s, border-color 0.3s;
-  mix-blend-mode: difference;
-}
-.cursor-circle.hovering {
-  width: 52px;
-  height: 52px;
-  border-color: rgba(201,168,76,0.7);
-}
 /* Text content */
 .lamp-content {
   position: relative;
@@ -3670,6 +3740,16 @@ button {
     grid-template-columns: 1fr !important;
   }
 
+  .rooms-hero {
+    min-height: 220px;
+    padding: 20px;
+  }
+
+  .rooms-hero-metrics,
+  .room-filter-bar {
+    grid-template-columns: 1fr !important;
+  }
+
   .card,
   .stat-card,
   .event-card,
@@ -4017,9 +4097,6 @@ button {
 </head>
 <body>
 
-<!-- Cursor tracking circle -->
-<div class="cursor-circle" id="cursor-circle"></div>
-
 <!-- ══ GET STARTED SCREEN ══ -->
 <div id="getstarted-screen">
   <div class="lamp-container">
@@ -4299,17 +4376,27 @@ button {
 
         <!-- SALLES -->
         <div id="page-rooms" class="page">
+          <div class="rooms-hero">
+            <div>
+              <h2 class="rooms-hero-title">Salons, réceptions et salles prêtes à réserver</h2>
+              <p class="rooms-hero-copy">Filtrez les espaces par ambiance, capacité et équipement, puis bloquez un créneau sans quitter le calendrier opérationnel.</p>
+            </div>
+            <div class="rooms-hero-metrics">
+              <div class="rooms-hero-metric"><strong id="rooms-hero-total">--</strong><span>salles</span></div>
+              <div class="rooms-hero-metric"><strong id="rooms-hero-free">--</strong><span>disponibles</span></div>
+              <div class="rooms-hero-metric"><strong id="rooms-hero-capacity">--</strong><span>capacité max</span></div>
+            </div>
+          </div>
           <div class="tabs">
             <button type="button" class="tab active" onclick="switchTab(this,'rooms-list')" data-target="rooms-list">Salles disponibles</button>
             <button type="button" class="tab" onclick="switchTab(this,'rooms-reservations')" data-target="rooms-reservations">Réservations</button>
             <button type="button" class="tab" onclick="switchTab(this,'rooms-calendar')" data-target="rooms-calendar">Calendrier</button>
           </div>
           <div id="rooms-list">
-            <div class="section-header" style="margin-bottom:16px">
-              <select id="room-type-filter" onchange="renderRooms()" aria-label="Filtrer par type de salle"><option value="">Tous les types</option></select>
-              <input type="number" id="room-capacity-filter" min="0" placeholder="Capacité min." oninput="renderRooms()" aria-label="Capacité minimale">
-              <input type="text" id="room-feature-filter" placeholder="Équipement (wifi, micro...)" oninput="renderRooms()" aria-label="Filtrer par équipement">
-              <div class="section-line"></div>
+            <div class="room-filter-bar">
+              <label class="room-filter-field"><span class="room-filter-icon">◆</span><select id="room-type-filter" onchange="renderRooms()" aria-label="Filtrer par type de salle"><option value="">Tous les types</option></select></label>
+              <label class="room-filter-field"><span class="room-filter-icon">◇</span><input type="number" id="room-capacity-filter" min="0" placeholder="Capacité min." oninput="renderRooms()" aria-label="Capacité minimale"></label>
+              <label class="room-filter-field"><span class="room-filter-icon">✦</span><input type="text" id="room-feature-filter" placeholder="Équipement (wifi, micro...)" oninput="renderRooms()" aria-label="Filtrer par équipement"></label>
               <button class="btn btn-sm admin-only-control" onclick="openRoomAdminModal()">+ Salle / tarif</button>
             </div>
             <div class="room-grid" id="rooms-grid"></div>

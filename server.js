@@ -2975,18 +2975,18 @@ app.post('/api/concierge/debrief', verifyToken, requireRole('admin'), async (req
   }
 });
 
-// Provider chain: prefer the broader quota / lower-cost path first, then smaller Groq, then larger Groq.
+// Provider chain: prefer the fastest operational path first, then broader fallback providers.
 const LLM_PROVIDERS = [];
-if (process.env.GEMINI_API_KEY) {
-  LLM_PROVIDERS.push(
-    { name: 'Gemini-2.5', model: 'gemini-2.5-flash', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', key: process.env.GEMINI_API_KEY, timeoutMs: 20000, quotaRank: 4, maxTokens: 900 },
-    { name: 'Gemini-2.0', model: 'gemini-2.0-flash', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', key: process.env.GEMINI_API_KEY, timeoutMs: 20000, quotaRank: 3, maxTokens: 900 }
-  );
-}
 if (process.env.GROQ_API_KEY) {
   LLM_PROVIDERS.push(
-    { name: 'Groq-llama8b', model: 'llama-3.1-8b-instant', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, timeoutMs: 30000, quotaRank: 2, maxTokens: 800 },
-    { name: 'Groq-llama70b', model: 'llama-3.3-70b-versatile', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, timeoutMs: 45000, quotaRank: 1, maxTokens: 700 }
+    { name: 'Groq-llama8b', model: 'llama-3.1-8b-instant', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, timeoutMs: 8000, quotaRank: 5, maxTokens: 700 },
+    { name: 'Groq-llama70b', model: 'llama-3.3-70b-versatile', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, timeoutMs: 12000, quotaRank: 4, maxTokens: 700 }
+  );
+}
+if (process.env.GEMINI_API_KEY) {
+  LLM_PROVIDERS.push(
+    { name: 'Gemini-2.5', model: 'gemini-2.5-flash', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', key: process.env.GEMINI_API_KEY, timeoutMs: 12000, quotaRank: 3, maxTokens: 900 },
+    { name: 'Gemini-2.0', model: 'gemini-2.0-flash', url: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', key: process.env.GEMINI_API_KEY, timeoutMs: 12000, quotaRank: 2, maxTokens: 900 }
   );
 }
 LLM_PROVIDERS.sort((a, b) => (b.quotaRank || 0) - (a.quotaRank || 0));
@@ -3016,6 +3016,7 @@ Capacités:
 - Demander des services (utilise request_service, list_services)
 - Générer des factures (utilise generate_invoice)
 - Consulter les rapports (utilise get_report_summary)
+- Consulter l'équipe active (utilise get_team_summary)
 - Consulter les notifications (utilise get_notifications)
 
 Salles (id ? nom):
@@ -3180,6 +3181,14 @@ const CHAT_TOOLS = [
     function: {
       name: 'get_report_summary',
       description: "Obtenir un résumé des statistiques: événements, invités, revenus, factures, salles.",
+      parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'get_team_summary',
+      description: "Obtenir le nombre d'utilisateurs, de membres actifs et la répartition par rôle.",
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -3423,6 +3432,26 @@ async function executeChatTool(toolName, args, userId, userRole) {
       };
     }
 
+    case 'get_team_summary': {
+      if (userRole !== 'admin' && userRole !== 'coordonnateur') {
+        return { success: false, error: 'Accès refusé aux statistiques d’équipe' };
+      }
+      const [total, active, inactive, byRole] = await Promise.all([
+        dbGet('SELECT COUNT(*) as c FROM users'),
+        dbGet("SELECT COUNT(*) as c FROM users WHERE status = 'Actif'"),
+        dbGet("SELECT COUNT(*) as c FROM users WHERE status = 'Inactif'"),
+        dbAll("SELECT role, COUNT(*) as count FROM users WHERE status = 'Actif' GROUP BY role ORDER BY role")
+      ]);
+      return {
+        success: true,
+        action: 'get_team_summary',
+        total: total.c || 0,
+        active: active.c || 0,
+        inactive: inactive.c || 0,
+        byRole
+      };
+    }
+
     case 'get_notifications': {
       const notifications = await dbAll(
         'SELECT title, body, type, isRead, dateCreated FROM notifications WHERE userId = ? ORDER BY dateCreated DESC LIMIT 10',
@@ -3621,6 +3650,8 @@ function formatAutomationReply(toolName, result) {
       return result.notifications.length
         ? `Mode automatique activé. Notifications récentes: ${result.notifications.slice(0, 5).map((item) => item.title).join(' ; ')}.`
         : 'Mode automatique activé. Aucune notification récente.';
+    case 'get_team_summary':
+      return `Mode automatique activé. L'équipe compte ${result.active} membre(s) actif(s) sur ${result.total} compte(s). Répartition active: ${result.byRole.map((row) => `${row.role}: ${row.count}`).join(' ; ') || 'aucun compte actif'}.`;
     case 'get_report_summary':
       return `Mode automatique activé. ${result.events.total} événements au total, ${result.events.active} actifs, ${result.guests.confirmed} invités confirmés, ${formatCad(result.revenue.paid)} encaissés et ${formatCad(result.revenue.pending)} en attente.`;
     case 'create_event':
@@ -3656,6 +3687,10 @@ async function runAutomationFallback(messages, userId, userRole) {
 
   if (/\bnotification/.test(text)) {
     toolName = 'get_notifications';
+  } else if (/\b(equipe|team|utilisateur|utilisateurs|membre|membres|staff|personnel)\b/.test(text) && /\b(actif|active|actifs|combien|nombre|total|statistique|stats?)\b/.test(text)) {
+    toolName = 'get_team_summary';
+  } else if (/\b(evenement|evenements)\b/.test(text) && /\b(combien|nombre|total|actif|actifs|statistique|stats?)\b/.test(text)) {
+    toolName = 'get_report_summary';
   } else if (/\b(rapport|statistique|revenu|dashboard|resume)\b/.test(text)) {
     toolName = 'get_report_summary';
   } else if (/\b(salle|salles|room|rooms)\b/.test(text) && /(disponib|liste|lister|affiche|afficher|montre|montrer|quelle|quelles|voir|salles)/.test(text)) {
@@ -3765,8 +3800,11 @@ app.post('/api/chat', verifyToken, async (req, res) => {
     const user = await dbGet('SELECT fname, lname, role FROM users WHERE id = ?', [req.userId]);
     const eventCounts = await getVisibleEventCounts(req.userId, req.userRole);
     const notifCount = await dbGet('SELECT COUNT(*) as c FROM notifications WHERE userId = ? AND isRead = 0', [req.userId]);
+    const activeTeamCount = req.userRole === 'admin' || req.userRole === 'coordonnateur'
+      ? await dbGet("SELECT COUNT(*) as c FROM users WHERE status = 'Actif'")
+      : { c: 0 };
 
-    const contextMsg = `\nContexte: ${user.fname} ${user.lname}, rôle: ${user.role}, ${eventCounts.total} événements visibles, ${eventCounts.active} actifs, ${notifCount.c} notifications non lues.`;
+    const contextMsg = `\nContexte: ${user.fname} ${user.lname}, rôle: ${user.role}, ${eventCounts.total} événements visibles, ${eventCounts.active} actifs, ${notifCount.c} notifications non lues, ${activeTeamCount.c || 0} membres d'équipe actifs visibles.`;
 
     const llmMessages = [
       { role: 'system', content: getChatSystemPrompt() + contextMsg },

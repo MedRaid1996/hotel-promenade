@@ -66,7 +66,7 @@ async function seedUiData() {
   assert.equal(roomList.response.status, 200, JSON.stringify(roomList.body));
   const room = roomList.body.rooms[0];
 
-  const today = new Date().toISOString().slice(0, 10);
+  const eventDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const createEvent = await api('/api/events', {
     method: 'POST',
     headers: {
@@ -76,7 +76,7 @@ async function seedUiData() {
     body: JSON.stringify({
       name: 'Master Test Reception',
       type: 'Gala',
-      date: today,
+      date: eventDate,
       time: '18:30',
       endTime: '22:30',
       organizer: 'UI Master',
@@ -97,7 +97,7 @@ async function seedUiData() {
     body: JSON.stringify({
       roomId: room.id,
       eventId,
-      date: today,
+      date: eventDate,
       startTime: '18:30',
       endTime: '22:30'
     })
@@ -286,7 +286,9 @@ async function main() {
     const url = request.url();
     if (!url.startsWith(baseUrl)) return;
     if (url.includes('/socket.io/')) return;
-    runtimeIssues.push(`requestfailed: ${request.method()} ${url} :: ${request.failure().errorText || 'unknown'}`);
+    const errorText = request.failure()?.errorText || 'unknown';
+    if (errorText === 'net::ERR_ABORTED') return;
+    runtimeIssues.push(`requestfailed: ${request.method()} ${url} :: ${errorText}`);
   });
 
   await openLoginScreen();

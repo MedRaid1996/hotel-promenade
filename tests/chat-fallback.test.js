@@ -127,3 +127,58 @@ test('chat returns a graceful rescue reply for non-automatable requests when pro
   assert.match(result.body.reply, /Mode concierge de secours active/i);
   assert.doesNotMatch(result.body.reply, /token|timeout|trop de temps|rate limit/i);
 });
+
+test('chat fallback reports active team count from the database', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+
+  const result = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Combien d equipe active ?' }]
+    })
+  });
+
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.automated, true);
+  assert.match(result.body.reply, /4 membre\(s\) actif\(s\)/i);
+});
+
+test('chat fallback creates events and reports the right total', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+  const stamp = Date.now();
+
+  for (const index of [1, 2, 3]) {
+    const created = await api('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: `Créer un événement Test Concierge ${stamp}-${index} le 2026-06-0${index} à 10:00` }]
+      })
+    });
+    assert.equal(created.response.status, 200, JSON.stringify(created.body));
+    assert.equal(created.body.automated, true);
+    assert.match(created.body.reply, /a été créé/i);
+  }
+
+  const count = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Combien d événements au total ?' }]
+    })
+  });
+
+  assert.equal(count.response.status, 200, JSON.stringify(count.body));
+  assert.equal(count.body.automated, true);
+  assert.match(count.body.reply, /3 événements au total/i);
+});
