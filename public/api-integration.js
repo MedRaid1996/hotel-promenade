@@ -2,16 +2,30 @@
 // Connects the frontend to the backend API.
 
 const API_BASE = '/api';
-const authStorage = window.sessionStorage;
+let authStorage = window.localStorage;
 
-var TOKEN = authStorage.getItem('token');
+function getStoredAuthItem(key) {
+  return window.localStorage.getItem(key) || window.sessionStorage.getItem(key);
+}
+
+function persistAuth(token, user, rememberSession = true) {
+  authStorage = rememberSession ? window.localStorage : window.sessionStorage;
+  const otherStorage = rememberSession ? window.sessionStorage : window.localStorage;
+  otherStorage.removeItem('token');
+  otherStorage.removeItem('currentUser');
+  authStorage.setItem('token', token);
+  authStorage.setItem('currentUser', JSON.stringify(user));
+}
+
+var TOKEN = getStoredAuthItem('token');
 var CURRENT_USER = null;
-const storedCurrentUser = authStorage.getItem('currentUser');
+const storedCurrentUser = getStoredAuthItem('currentUser');
 if (storedCurrentUser) {
   try {
     CURRENT_USER = JSON.parse(storedCurrentUser);
   } catch (_) {
-    authStorage.removeItem('currentUser');
+    window.localStorage.removeItem('currentUser');
+    window.sessionStorage.removeItem('currentUser');
   }
 }
 
@@ -101,7 +115,7 @@ async function apiUpload(endpoint, formData) {
   return data;
 }
 
-async function apiLogin(email, password) {
+async function apiLogin(email, password, rememberSession = true) {
   const response = await fetchWithTimeout(`${API_BASE}/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -115,13 +129,12 @@ async function apiLogin(email, password) {
 
   TOKEN = data.token;
   CURRENT_USER = data.user;
-  authStorage.setItem('token', TOKEN);
-  authStorage.setItem('currentUser', JSON.stringify(CURRENT_USER));
+  persistAuth(TOKEN, CURRENT_USER, rememberSession);
   syncAuthGlobals();
   return data;
 }
 
-async function apiRegister(fname, lname, email, password) {
+async function apiRegister(fname, lname, email, password, rememberSession = true) {
   const response = await fetchWithTimeout(`${API_BASE}/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -135,8 +148,7 @@ async function apiRegister(fname, lname, email, password) {
 
   TOKEN = data.token;
   CURRENT_USER = data.user;
-  authStorage.setItem('token', TOKEN);
-  authStorage.setItem('currentUser', JSON.stringify(CURRENT_USER));
+  persistAuth(TOKEN, CURRENT_USER, rememberSession);
   syncAuthGlobals();
   return data;
 }
@@ -144,8 +156,10 @@ async function apiRegister(fname, lname, email, password) {
 function apiLogout() {
   TOKEN = null;
   CURRENT_USER = null;
-  authStorage.removeItem('token');
-  authStorage.removeItem('currentUser');
+  window.localStorage.removeItem('token');
+  window.localStorage.removeItem('currentUser');
+  window.sessionStorage.removeItem('token');
+  window.sessionStorage.removeItem('currentUser');
   syncAuthGlobals();
 }
 

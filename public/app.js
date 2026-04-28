@@ -279,7 +279,7 @@ function initSocket() {
     socketConnected = true;
     
     // Authenticate with JWT token
-    const token = sessionStorage.getItem('token');
+    const token = window.TOKEN || localStorage.getItem('token') || sessionStorage.getItem('token');
     if (token) {
       socket.emit('authenticate', token);
     }
@@ -1055,11 +1055,12 @@ function initLampParticles() {
 async function doLogin() {
   const email = document.getElementById('login-email').value.trim().toLowerCase();
   const password = document.getElementById('login-password').value;
+  const rememberSession = document.getElementById('remember-session')?.checked !== false;
   if (!email || !password) { showToast('Courriel et mot de passe requis.', 'error'); return; }
 
   try {
     setLoginBusy(true, 'Connexion...');
-    const data = await apiLogin(email, password);
+    const data = await apiLogin(email, password, rememberSession);
     currentUser = data.user;
     currentRole = data.user.role;
 
@@ -4223,6 +4224,13 @@ window.addEventListener('DOMContentLoaded', () => {
     document.getElementById('app').style.display = 'none';
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('getstarted-screen').style.display = 'flex';
+  }
+});
+
+window.addEventListener('storage', (event) => {
+  if (!['token', 'currentUser'].includes(event.key)) return;
+  if (!localStorage.getItem('token') && !sessionStorage.getItem('token') && currentUser) {
+    doLogout();
   }
 });
 
