@@ -2139,6 +2139,8 @@ async function populateEventOwnerSelect(selectedOwnerId = '') {
   if (currentRole !== 'admin') {
     group.style.display = 'none';
     select.value = '';
+    document.getElementById('ev-organizer').value = `${currentUser?.fname || ''} ${currentUser?.lname || ''}`.trim();
+    document.getElementById('ev-contact').value = currentUser?.email || '';
     return;
   }
   group.style.display = '';
@@ -2150,10 +2152,29 @@ async function populateEventOwnerSelect(selectedOwnerId = '') {
   } catch (err) {
     console.warn('Could not load users for event owner select:', err);
   }
-  const assignableUsers = DATA.users.filter(user => ['organisateur', 'admin', 'coordonnateur'].includes(user.role) && user.status !== 'Inactif');
-  select.innerHTML = '<option value="">— Administrateur / non assigné —</option>' +
-    assignableUsers.map(user => `<option value="${user.id}">${escapeHtml(`${user.fname || ''} ${user.lname || ''}`.trim() || user.email)} (${ROLE_LABELS[user.role] || user.role})</option>`).join('');
-  select.value = selectedOwnerId ? String(selectedOwnerId) : '';
+  const organizers = DATA.users.filter(user => user.role === 'organisateur' && user.status !== 'Inactif');
+  select.innerHTML = '<option value="">— Sélectionner un organisateur —</option>' +
+    organizers.map(user => {
+      const name = `${user.fname || ''} ${user.lname || ''}`.trim() || user.email;
+      return `<option value="${user.id}" data-name="${escapeHtml(name)}" data-email="${escapeHtml(user.email || '')}">${escapeHtml(name)} · ${escapeHtml(user.email || '')}</option>`;
+    }).join('');
+  select.value = selectedOwnerId && organizers.some(user => Number(user.id) === Number(selectedOwnerId)) ? String(selectedOwnerId) : '';
+  syncSelectedOrganizer();
+}
+
+function syncSelectedOrganizer() {
+  const select = document.getElementById('ev-owner');
+  const organizerInput = document.getElementById('ev-organizer');
+  const contactInput = document.getElementById('ev-contact');
+  const helper = document.getElementById('ev-owner-helper');
+  if (!select || !organizerInput || !contactInput) return;
+
+  const option = select.selectedOptions?.[0];
+  const name = option?.dataset?.name || '';
+  const email = option?.dataset?.email || '';
+  organizerInput.value = name;
+  contactInput.value = email;
+  if (helper) helper.textContent = email ? `Contact: ${email}` : 'Choisissez un organisateur actif du système.';
 }
 
 async function editEvent(id) {
@@ -3725,6 +3746,7 @@ function buildEventPayload(status) {
   const budgetRaw = document.getElementById('ev-budget').value;
   const guestsRaw = document.getElementById('ev-guests').value;
   const contact = document.getElementById('ev-contact').value.trim();
+  const ownerUserId = document.getElementById('ev-owner')?.value || '';
   const budget = budgetRaw === '' ? 0 : Number(budgetRaw);
   const guests = guestsRaw === '' ? 0 : Number(guestsRaw);
 
@@ -3739,6 +3761,7 @@ function buildEventPayload(status) {
   }
   if (!Number.isFinite(budget) || budget < 0) return { error: 'Le budget doit être positif ou zéro.' };
   if (!Number.isInteger(guests) || guests < 0) return { error: 'Le nombre d’invités doit être un entier positif ou zéro.' };
+  if (currentRole === 'admin' && status !== 'Brouillon' && !ownerUserId) return { error: 'Veuillez choisir un organisateur dans la liste.' };
   if (contact && !isValidEmailAddress(contact)) return { error: 'Le courriel de contact est invalide.' };
 
   return { value: {
@@ -3755,7 +3778,7 @@ function buildEventPayload(status) {
     contact,
     description: document.getElementById('ev-desc').value,
     status,
-    ownerUserId: document.getElementById('ev-owner')?.value || undefined,
+    ownerUserId: ownerUserId || undefined,
   } };
 }
 
@@ -4472,6 +4495,7 @@ Object.assign(window, {
   openModal,
   closeModal,
   openEventModal,
+  syncSelectedOrganizer,
   saveEvent,
   saveEventDraft,
   viewEvent,
