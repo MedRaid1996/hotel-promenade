@@ -139,6 +139,13 @@
   --glass-bg: rgba(20, 20, 20, 0.8);
   --glass-border: rgba(201, 168, 76, 0.1);
   --glass-blur: 12px;
+  --control-bg: linear-gradient(135deg, rgba(255,255,255,0.055), rgba(201,168,76,0.045));
+  --control-bg-hover: linear-gradient(135deg, rgba(255,255,255,0.075), rgba(201,168,76,0.07));
+  --control-border: rgba(201,168,76,0.2);
+  --control-border-focus: rgba(201,168,76,0.55);
+  --control-placeholder: rgba(248,242,223,0.48);
+  --control-shadow: inset 0 1px 0 rgba(255,255,255,0.035), 0 10px 28px rgba(0,0,0,0.16);
+  --control-option-bg: #181712;
   
   /* Skeleton loading */
   --skeleton-bg: linear-gradient(90deg, var(--surface2) 25%, var(--surface3) 50%, var(--surface2) 75%);
@@ -167,6 +174,13 @@
   
   --glass-bg: rgba(255, 255, 255, 0.9);
   --glass-border: rgba(154, 123, 45, 0.1);
+  --control-bg: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(154,123,45,0.075));
+  --control-bg-hover: linear-gradient(135deg, rgba(255,255,255,1), rgba(154,123,45,0.12));
+  --control-border: rgba(154,123,45,0.22);
+  --control-border-focus: rgba(154,123,45,0.5);
+  --control-placeholder: rgba(26,26,26,0.46);
+  --control-shadow: inset 0 1px 0 rgba(255,255,255,0.7), 0 10px 24px rgba(71,55,20,0.08);
+  --control-option-bg: #FFFFFF;
   --skeleton-bg: linear-gradient(90deg, var(--surface2) 25%, var(--surface3) 50%, var(--surface2) 75%);
 }
 
@@ -4567,6 +4581,142 @@ button {
   .modal {
     max-height: calc(100dvh - 16px);
   }
+}
+
+/* Final filter system override: applies after responsive rules */
+.section-header .search-box,
+.audit-toolbar .search-box,
+.search-box[style],
+.room-filter-bar,
+.room-filter-field,
+.section-header select,
+.section-header input[type="date"],
+.audit-toolbar select,
+select[id$="-filter"],
+input[id$="-filter"] {
+  border-color: var(--control-border) !important;
+  background: var(--control-bg) !important;
+  color: var(--text) !important;
+  box-shadow: var(--control-shadow) !important;
+}
+
+.section-header .search-box,
+.audit-toolbar .search-box,
+.search-box[style],
+.room-filter-field,
+.section-header select,
+.section-header input[type="date"],
+.audit-toolbar select,
+select[id$="-filter"],
+input[id$="-filter"] {
+  min-height: 44px;
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-radius: 14px !important;
+}
+
+.room-filter-bar {
+  border-radius: 18px !important;
+  padding: 12px;
+}
+
+.section-header .search-box:focus-within,
+.audit-toolbar .search-box:focus-within,
+.room-filter-field:focus-within,
+.section-header select:focus,
+.section-header input[type="date"]:focus,
+.audit-toolbar select:focus,
+select[id$="-filter"]:focus,
+input[id$="-filter"]:focus {
+  border-color: var(--control-border-focus) !important;
+  background: var(--control-bg-hover) !important;
+  box-shadow: 0 0 0 3px var(--gold-glow), 0 12px 32px rgba(0,0,0,0.14) !important;
+}
+
+.section-header .search-box input,
+.audit-toolbar .search-box input,
+.room-filter-field input,
+.room-filter-field select,
+.section-header select,
+.section-header input[type="date"],
+.audit-toolbar select,
+select[id$="-filter"],
+input[id$="-filter"] {
+  font-family: 'DM Sans', sans-serif !important;
+  font-size: 12px !important;
+  letter-spacing: 0.3px !important;
+  color: var(--text) !important;
+}
+
+.section-header .search-box input,
+.audit-toolbar .search-box input,
+.room-filter-field input,
+.room-filter-field select {
+  background: transparent !important;
+  border: 0 !important;
+  box-shadow: none !important;
+}
+
+.section-header .search-box span,
+.audit-toolbar .search-box span,
+.room-filter-icon {
+  color: var(--gold-light) !important;
+}
+
+.section-header .search-box input::placeholder,
+.audit-toolbar .search-box input::placeholder,
+.room-filter-field input::placeholder,
+input[id$="-filter"]::placeholder {
+  color: var(--control-placeholder) !important;
+}
+
+.section-header select,
+.audit-toolbar select,
+.room-filter-field select,
+select[id$="-filter"] {
+  appearance: none !important;
+  padding-right: 38px !important;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--gold-light) 50%),
+    linear-gradient(135deg, var(--gold-light) 50%, transparent 50%),
+    var(--control-bg) !important;
+  background-position:
+    calc(100% - 18px) 19px,
+    calc(100% - 13px) 19px,
+    0 0 !important;
+  background-size: 5px 5px, 5px 5px, 100% 100% !important;
+  background-repeat: no-repeat !important;
+}
+
+.section-header select option,
+.audit-toolbar select option,
+.room-filter-field select option,
+select[id$="-filter"] option {
+  background: var(--control-option-bg) !important;
+  color: var(--text) !important;
+}
+
+.section-header input[type="date"],
+input[type="date"][id$="-filter"] {
+  padding: 0 14px !important;
+  color-scheme: dark;
+}
+
+[data-theme="light"] .section-header input[type="date"],
+[data-theme="light"] input[type="date"][id$="-filter"] {
+  color-scheme: light;
+}
+
+.section-header input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="date"][id$="-filter"]::-webkit-calendar-picker-indicator {
+  opacity: 0.8;
+  filter: sepia(1) saturate(1.4) hue-rotate(3deg) brightness(1.15);
+  cursor: pointer;
+}
+
+[data-theme="light"] .section-header input[type="date"]::-webkit-calendar-picker-indicator,
+[data-theme="light"] input[type="date"][id$="-filter"]::-webkit-calendar-picker-indicator {
+  filter: sepia(1) saturate(1.2) hue-rotate(350deg) brightness(0.82);
 }
 </style>
 </head>
