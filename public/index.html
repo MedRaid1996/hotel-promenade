@@ -1054,6 +1054,7 @@ body {
   display: grid;
   place-items: center;
   background: rgba(201,168,76,0.14);
+  color: var(--gold);
   font-size: 18px;
 }
 .weather-chip-copy {
@@ -1076,6 +1077,7 @@ body {
   font-size: 18px;
   font-weight: 600;
   color: var(--gold);
+  font-variant-numeric: tabular-nums;
 }
 .weather-chip-desc {
   font-size: 12px;
@@ -1097,6 +1099,9 @@ body {
   transition: all 0.2s;
 }
 .notifications-btn:hover { border-color: var(--gold); color: var(--gold); }
+.chat-topbar-btn {
+  position: relative;
+}
 .theme-toggle:focus-visible,
 .notifications-btn:focus-visible,
 .nav-item:focus-visible,
@@ -1121,6 +1126,16 @@ button:focus-visible {
   height: 6px;
   background: var(--gold);
   border-radius: 50%;
+}
+.chat-unread-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  min-width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--gold);
+  display: none;
 }
 .content { padding: 32px; flex: 1; }
 
@@ -1506,7 +1521,182 @@ table tbody tr:last-child td { border-bottom: none; }
   gap: 10px;
   justify-content: flex-end;
 }
-
+.team-chat-panel {
+  position: fixed;
+  top: 82px;
+  right: 28px;
+  z-index: 10002;
+  width: min(92vw, 760px);
+  height: min(74vh, 620px);
+  display: none;
+  grid-template-columns: 260px 1fr;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  box-shadow: 0 24px 80px rgba(0,0,0,0.58);
+}
+.team-chat-panel.open { display: grid; }
+.team-chat-sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--surface2);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.team-chat-head { padding: 16px; border-bottom: 1px solid var(--border); }
+.team-chat-title { font-family: 'Cormorant Garamond', serif; font-size: 22px; color: var(--gold); }
+.team-chat-subtitle { margin-top: 3px; font-size: 12px; color: var(--text-muted); }
+.team-chat-users { overflow-y: auto; padding: 8px; }
+.team-chat-user {
+  width: 100%;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  gap: 9px;
+  align-items: center;
+  text-align: left;
+  cursor: pointer;
+}
+.team-chat-user:hover,
+.team-chat-user.active { border-color: rgba(201,168,76,0.28); background: rgba(201,168,76,0.08); }
+.team-chat-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(201,168,76,0.16);
+  color: var(--gold);
+  font-size: 12px;
+  font-weight: 700;
+}
+.team-chat-name { font-size: 13px; font-weight: 600; }
+.team-chat-name,
+.team-chat-role {
+  display: block;
+}
+.team-chat-role { margin-top: 4px; font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; }
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin-top: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+.role-badge-admin { color: var(--gold); border-color: rgba(201,168,76,0.45); background: rgba(201,168,76,0.12); }
+.role-badge-coordonnateur { color: #6FB6FF; border-color: rgba(111,182,255,0.42); background: rgba(76,142,201,0.13); }
+.role-badge-compta { color: #78D39B; border-color: rgba(120,211,155,0.42); background: rgba(76,175,124,0.13); }
+.role-badge-organisateur { color: var(--text-muted); border-color: var(--border); background: rgba(255,255,255,0.035); }
+.team-chat-count {
+  min-width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: var(--gold);
+  color: #0d0d0d;
+  font-size: 11px;
+  font-weight: 700;
+}
+.team-chat-main { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; }
+.team-chat-current {
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.team-chat-current strong { display: block; font-size: 14px; }
+.team-chat-current span { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+.team-chat-messages {
+  padding: 16px;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  background: radial-gradient(circle at top right, rgba(201,168,76,0.06), transparent 38%);
+}
+.team-chat-empty {
+  align-self: center;
+  justify-self: center;
+  color: var(--text-muted);
+  text-align: center;
+  max-width: 360px;
+  line-height: 1.55;
+}
+.team-chat-empty-card {
+  position: relative;
+  padding: 28px;
+  border: 1px solid rgba(201,168,76,0.22);
+  background:
+    radial-gradient(circle at top, rgba(201,168,76,0.14), transparent 46%),
+    linear-gradient(135deg, rgba(255,255,255,0.035), rgba(255,255,255,0.01));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+}
+.team-chat-empty-mark {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 14px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(201,168,76,0.38);
+  color: var(--gold);
+  font-size: 24px;
+  background: rgba(201,168,76,0.08);
+}
+.team-chat-empty-title {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 25px;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+.team-chat-empty-copy {
+  font-size: 13px;
+}
+.team-message { max-width: 78%; padding: 10px 12px; border: 1px solid var(--border); background: var(--surface2); }
+.team-message.mine { justify-self: end; border-color: rgba(201,168,76,0.4); background: rgba(201,168,76,0.1); }
+.team-message-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 5px; font-size: 10px; color: var(--text-muted); }
+.team-message-body { white-space: pre-wrap; line-height: 1.48; }
+.team-chat-compose {
+  border-top: 1px solid var(--border);
+  padding: 14px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(201,168,76,0.045));
+}
+.team-chat-compose textarea {
+  min-height: 62px;
+  max-height: 120px;
+  resize: vertical;
+  border: 1px solid rgba(201,168,76,0.26);
+  border-radius: 14px;
+  padding: 13px 14px;
+  background:
+    radial-gradient(circle at top left, rgba(201,168,76,0.08), transparent 42%),
+    var(--surface2);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
+}
+.team-chat-compose textarea::placeholder {
+  color: var(--text-muted);
+}
+.team-chat-compose .btn {
+  align-self: stretch;
+  border-radius: 14px;
+  padding-left: 18px;
+  padding-right: 18px;
+}
 /* ── CALENDAR (Legacy) ── */
 .calendar-grid {
   display: grid;
@@ -1821,6 +2011,9 @@ table tbody tr:last-child td { border-bottom: none; }
   cursor: pointer;
   position: relative;
   overflow: hidden;
+  min-height: 245px;
+  display: flex;
+  flex-direction: column;
 }
 .event-card::before {
   content: '';
@@ -1835,10 +2028,39 @@ table tbody tr:last-child td { border-bottom: none; }
 }
 .event-card:hover { border-color: var(--border-strong); }
 .event-card:hover::before { opacity: 1; }
+.event-card-main {
+  flex: 1;
+}
+.event-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  margin-bottom: 8px;
+}
 .event-card-title { font-size: 15px; font-weight: 500; color: var(--text); margin-bottom: 8px; }
 .event-card-meta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
 .event-meta-item { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 5px; }
-.event-card-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; }
+.event-card-footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.event-card-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 168px;
+}
+.event-card-actions .btn {
+  min-width: 78px;
+  justify-content: center;
+}
 
 /* ── TOAST ── */
 .toast-container {
@@ -2041,20 +2263,20 @@ table tbody tr:last-child td { border-bottom: none; }
   align-items: center;
   margin-bottom: 16px;
   padding: 12px;
-  border: 1px solid var(--border);
-  background: linear-gradient(135deg, rgba(201,168,76,0.08), rgba(255,255,255,0.025));
+  border: 1px solid rgba(20,20,20,0.14);
+  background: linear-gradient(135deg, #fffdf7, #f6efe0);
 }
 .room-filter-field {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   min-height: 44px;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  border: 1px solid rgba(20,20,20,0.18);
+  background: #ffffff;
   padding: 0 10px;
 }
 .room-filter-icon {
-  color: var(--gold);
+  color: #101010;
   font-size: 14px;
 }
 .room-filter-field input,
@@ -2064,8 +2286,15 @@ table tbody tr:last-child td { border-bottom: none; }
   border: 0;
   outline: 0;
   background: transparent;
-  color: var(--text);
+  color: #101010;
   font: inherit;
+}
+.room-filter-field input::placeholder {
+  color: rgba(16,16,16,0.62);
+}
+.room-filter-field select option {
+  color: #101010;
+  background: #ffffff;
 }
 .room-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .room-card {
@@ -2992,7 +3221,10 @@ body {
   gap: 24px;
   padding: 34px;
   border-radius: 28px;
+  isolation: isolate;
+  perspective: 1200px;
   background:
+    linear-gradient(115deg, rgba(255,255,255,0.065), transparent 22%),
     radial-gradient(circle at top left, rgba(201,168,76,0.22), transparent 28%),
     radial-gradient(circle at bottom right, rgba(68,101,79,0.22), transparent 26%),
     linear-gradient(135deg, #181108 0%, #201710 42%, #102119 100%);
@@ -3000,8 +3232,81 @@ body {
   box-shadow: 0 30px 70px rgba(0,0,0,0.28);
 }
 
+.dash-hero::after {
+  content: '';
+  position: absolute;
+  inset: auto 7% -22% 7%;
+  height: 52%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center, rgba(201,168,76,0.2), transparent 68%);
+  filter: blur(24px);
+  transform: rotateX(66deg);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.dash-hero-ambience {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.lobby-orb,
+.lobby-arch {
+  position: absolute;
+  display: block;
+}
+
+.lobby-orb {
+  border-radius: 999px;
+  filter: blur(0.2px);
+}
+
+.lobby-orb-main {
+  width: 260px;
+  height: 260px;
+  right: 24%;
+  top: -92px;
+  background: radial-gradient(circle, rgba(240,217,147,0.34), rgba(201,168,76,0.08) 45%, transparent 70%);
+  animation: lobbyOrbFloat 12s ease-in-out infinite;
+}
+
+.lobby-orb-side {
+  width: 170px;
+  height: 170px;
+  left: 8%;
+  bottom: -70px;
+  background: radial-gradient(circle, rgba(121,151,130,0.28), rgba(121,151,130,0.08) 48%, transparent 72%);
+  animation: lobbyOrbFloat 14s ease-in-out infinite reverse;
+}
+
+.lobby-arch {
+  width: 190px;
+  height: 310px;
+  border: 1px solid rgba(240,217,147,0.12);
+  border-bottom: 0;
+  border-radius: 95px 95px 0 0;
+  opacity: 0.65;
+}
+
+.lobby-arch-left {
+  left: 42%;
+  bottom: -42px;
+  transform: rotateY(36deg) rotateZ(-5deg);
+}
+
+.lobby-arch-right {
+  right: 7%;
+  top: 24px;
+  transform: rotateY(-34deg) rotateZ(6deg);
+}
+
 .dash-hero-content {
   align-self: end;
+  position: relative;
+  z-index: 2;
 }
 
 .dash-hero-pill {
@@ -3030,6 +3335,8 @@ body {
 }
 
 .dash-hero-aside {
+  position: relative;
+  z-index: 2;
   display: grid;
   gap: 14px;
   align-self: stretch;
@@ -3038,6 +3345,24 @@ body {
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(10,10,10,0.20);
   backdrop-filter: blur(14px);
+  transform: rotateY(-4deg) translateZ(18px);
+  transform-style: preserve-3d;
+  box-shadow: 0 28px 60px rgba(0,0,0,0.24);
+}
+
+@keyframes lobbyOrbFloat {
+  0%, 100% { transform: translate3d(0,0,0) scale(1); }
+  50% { transform: translate3d(10px,14px,0) scale(1.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lobby-orb-main,
+  .lobby-orb-side,
+  .signature-slide-main,
+  .signature-slide-secondary,
+  .signature-slide-tertiary {
+    animation: none !important;
+  }
 }
 
 .dash-hero-aside-grid {
@@ -3103,6 +3428,43 @@ body {
 
 .stat-card {
   padding: 26px;
+}
+
+.stat-card-clickable {
+  cursor: pointer;
+  min-height: 170px;
+  transform-style: preserve-3d;
+}
+
+.stat-card-clickable::before {
+  content: 'Ouvrir';
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(201,168,76,0.16);
+  color: var(--gold);
+  background: rgba(201,168,76,0.06);
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.stat-card-clickable:hover,
+.stat-card-clickable:focus-visible {
+  transform: translateY(-5px) rotateX(2deg);
+  outline: none;
+  border-color: rgba(201,168,76,0.38);
+}
+
+.stat-card-clickable:hover::before,
+.stat-card-clickable:focus-visible::before {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .stat-icon-wrap {
@@ -3600,6 +3962,10 @@ button {
   .dash-hero,
   .signature-showcase {
     grid-template-columns: 1fr;
+  }
+
+  .dash-hero-aside {
+    transform: none;
   }
 
   .dash-hero h1,
@@ -4213,14 +4579,14 @@ button {
         <div class="topbar-actions">
           <div class="topbar-atmosphere">
             <div id="header-weather" class="weather-chip">
-              <div class="weather-chip-icon">⋯</div>
+              <div class="weather-chip-icon">⌖</div>
               <div class="weather-chip-copy">
-                <div class="weather-chip-meta">Montréal en direct</div>
+                <div class="weather-chip-meta">Heure locale</div>
                 <div class="weather-chip-main">
-                  <span class="weather-chip-temp">--°C</span>
-                  <span class="weather-chip-desc">Chargement</span>
+                  <span class="weather-chip-temp">--:--</span>
+                  <span class="weather-chip-desc">Montréal, QC</span>
                 </div>
-                <div class="weather-chip-sub">Conditions locales</div>
+                <div class="weather-chip-sub">123 Avenue La Promenade</div>
               </div>
             </div>
           </div>
@@ -4234,6 +4600,10 @@ button {
             🔔
             <div class="notif-dot" id="notif-dot"></div>
           </button>
+          <button class="notifications-btn chat-topbar-btn" onclick="toggleTeamChat()" id="team-chat-btn" aria-label="Ouvrir la messagerie" aria-expanded="false">
+            ✉
+            <div class="chat-unread-dot" id="chat-unread-dot"></div>
+          </button>
           <button class="btn btn-sm" id="topbar-action-btn" onclick="topbarAction()" style="display:none" aria-label="Action principale"></button>
         </div>
       </div>
@@ -4241,6 +4611,12 @@ button {
         <!-- DASHBOARD -->
         <div id="page-dashboard" class="page active">
           <div class="dash-hero" id="dash-hero">
+            <div class="dash-hero-ambience" aria-hidden="true">
+              <span class="lobby-orb lobby-orb-main"></span>
+              <span class="lobby-orb lobby-orb-side"></span>
+              <span class="lobby-arch lobby-arch-left"></span>
+              <span class="lobby-arch lobby-arch-right"></span>
+            </div>
             <div class="dash-hero-content">
               <div class="dash-hero-pill" id="dash-hero-kicker">Aujourd'hui à La Promenade</div>
               <h1 id="dash-hero-title">Tableau de bord</h1>
@@ -4312,7 +4688,7 @@ button {
             <div class="locale-side">
               <div class="locale-panel">
                 <div class="locale-panel-title">Montréal en ce moment</div>
-                <div id="weather-widget" class="weather-loading">Chargement de la météo...</div>
+                <div id="weather-widget" class="weather-loading">Chargement de l’heure locale...</div>
               </div>
               <div class="locale-panel">
                 <div class="locale-panel-title">Repères à proximité</div>
@@ -4361,11 +4737,11 @@ button {
           <div class="section-header" style="margin-bottom:20px">
             <div class="search-box" style="flex:1;max-width:320px">
               <span style="color:var(--text-muted)">⌕</span>
-              <input type="text" placeholder="Rechercher un événement..." oninput="filterEvents(this.value)" aria-label="Rechercher un événement">
+              <input type="text" id="event-search-input" placeholder="Rechercher un événement..." oninput="filterEvents(this.value)" aria-label="Rechercher un événement">
             </div>
             <div class="section-line"></div>
             <div style="display:flex;gap:8px">
-              <select style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:12px;border-radius:2px" onchange="filterEventStatus(this.value)">
+              <select id="event-status-filter" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);padding:8px 12px;font-family:'DM Sans',sans-serif;font-size:12px;border-radius:2px" onchange="filterEventStatus(this.value)">
                 <option value="">Tous les statuts</option>
                 <option>Planifié</option><option>Confirmé</option><option>En cours</option><option>Terminé</option><option>Annulé</option>
               </select>
@@ -4419,7 +4795,7 @@ button {
           <div class="section-header" style="margin-bottom:20px">
             <div class="search-box" style="flex:1;max-width:320px">
               <span style="color:var(--text-muted)">⌕</span>
-              <input type="text" placeholder="Rechercher un invité..." oninput="filterGuests(this.value)" aria-label="Rechercher un invité">
+              <input type="text" id="guest-search-input" placeholder="Rechercher un invité..." oninput="filterGuests(this.value)" aria-label="Rechercher un invité">
             </div>
             <div class="section-line"></div>
             <button class="btn btn-sm" onclick="openGuestModal()">+ Ajouter</button>
@@ -4854,6 +5230,36 @@ button {
     <button class="modal-close" onclick="toggleNotifications()" aria-label="Fermer les notifications">✕</button>
   </div>
   <div id="notif-list-panel"></div>
+</div>
+
+<div class="team-chat-panel" id="team-chat-panel" aria-label="Messagerie interne">
+  <aside class="team-chat-sidebar">
+    <div class="team-chat-head">
+      <div class="team-chat-title">Messagerie</div>
+      <div class="team-chat-subtitle">Choisissez un utilisateur actif</div>
+    </div>
+    <div class="team-chat-users" id="team-chat-users"></div>
+  </aside>
+  <section class="team-chat-main">
+    <div class="team-chat-current">
+      <div>
+        <strong id="team-chat-current-name">Sélectionnez un destinataire</strong>
+        <span id="team-chat-current-role">Messages directs internes</span>
+      </div>
+      <button class="modal-close" onclick="toggleTeamChat(false)" aria-label="Fermer la messagerie">✕</button>
+    </div>
+    <div class="team-chat-messages" id="team-chat-messages">
+      <div class="team-chat-empty team-chat-empty-card">
+        <div class="team-chat-empty-mark">✉</div>
+        <div class="team-chat-empty-title">Salon discret de l’équipe</div>
+        <div class="team-chat-empty-copy">Sélectionnez un membre actif pour coordonner une facture, une salle, un service ou un événement sans quitter le tableau de bord.</div>
+      </div>
+    </div>
+    <div class="team-chat-compose">
+      <textarea id="team-chat-input" placeholder="Écrire un message..." maxlength="1200" onkeydown="if(event.key==='Enter' && (event.ctrlKey || event.metaKey)){submitTeamChatMessage()}"></textarea>
+      <button class="btn btn-sm" onclick="submitTeamChatMessage()">Envoyer</button>
+    </div>
+  </section>
 </div>
 
 <!-- Toast container -->

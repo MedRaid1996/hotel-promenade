@@ -255,6 +255,7 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 25,
+  skip: () => process.env.DISABLE_RATE_LIMIT === 'true',
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Trop de tentatives. Réessayez dans quelques minutes.' }
@@ -434,6 +435,17 @@ function initializeDatabase() {
       FOREIGN KEY (userId) REFERENCES users(id)
     )`);
 
+    db.run(`CREATE TABLE IF NOT EXISTS direct_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      senderId INTEGER NOT NULL,
+      recipientId INTEGER NOT NULL,
+      message TEXT NOT NULL,
+      isRead INTEGER DEFAULT 0,
+      dateCreated DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (senderId) REFERENCES users(id),
+      FOREIGN KEY (recipientId) REFERENCES users(id)
+    )`);
+
     db.run(`CREATE TABLE IF NOT EXISTS notification_preferences (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       userId INTEGER UNIQUE,
@@ -477,6 +489,8 @@ function initializeDatabase() {
     db.run(`ALTER TABLE services ADD COLUMN userId INTEGER`, () => { });
     db.run(`ALTER TABLE reservations ADD COLUMN userId INTEGER`, () => { });
     db.run(`ALTER TABLE invoices ADD COLUMN userId INTEGER`, () => { });
+    db.run(`CREATE INDEX IF NOT EXISTS idx_direct_messages_pair ON direct_messages(senderId, recipientId, dateCreated)`, () => { });
+    db.run(`CREATE INDEX IF NOT EXISTS idx_direct_messages_unread ON direct_messages(recipientId, isRead)`, () => { });
 
     db.run(`UPDATE guests SET userId = (SELECT userId FROM events e WHERE e.id = guests.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
     db.run(`UPDATE services SET userId = (SELECT userId FROM events e WHERE e.id = services.eventId) WHERE userId IS NULL AND eventId IS NOT NULL`);
@@ -2396,6 +2410,114 @@ app.put('/api/notifications/read-all', verifyToken, async (req, res) => {
   }
 });
 
+// --------------------------------------------------
+// DIRECT MESSAGES API
+// --------------------------------------------------
+
+function mapDirectMessage(row) {
+  return {
+    id: row.id,
+    senderId: row.senderId,
+    recipientId: row.recipientId,
+    message: row.message,
+    isRead: row.isRead,
+    dateCreated: row.dateCreated,
+    senderName: `${row.senderFname || ''} ${row.senderLname || ''}`.trim() || 'Utilisateur',
+    senderRole: row.senderRole,
+    recipientName: `${row.recipientFname || ''} ${row.recipientLname || ''}`.trim() || 'Utilisateur',
+    recipientRole: row.recipientRole
+  };
+}
+
+app.get('/api/direct-messages/users', verifyToken, async (req, res) => {
+  try {
+    const users = await dbAll(`
+      SELECT u.id, u.fname, u.lname, u.email, u.role, u.status,
+             COALESCE(unread.count, 0) as unreadCount,
+             lastMsg.dateCreated as lastMessageAt
+      FROM users u
+      LEFT JOIN (
+        SELECT senderId, COUNT(*) as count
+        FROM direct_messages
+        WHERE recipientId = ? AND isRead = 0
+        GROUP BY senderId
+      ) unread ON unread.senderId = u.id
+      LEFT JOIN (
+        SELECT CASE WHEN senderId = ? THEN recipientId ELSE senderId END as otherUserId,
+               MAX(dateCreated) as dateCreated
+        FROM direct_messages
+        WHERE senderId = ? OR recipientId = ?
+        GROUP BY otherUserId
+      ) lastMsg ON lastMsg.otherUserId = u.id
+      WHERE u.status = 'Actif' AND u.id != ?
+      ORDER BY unreadCount DESC, lastMessageAt DESC, u.role ASC, u.fname ASC
+    `, [req.userId, req.userId, req.userId, req.userId, req.userId]);
+    const totalUnread = await dbGet('SELECT COUNT(*) as c FROM direct_messages WHERE recipientId = ? AND isRead = 0', [req.userId]);
+    res.json({ users, unread: totalUnread.c || 0 });
+  } catch (e) {
+    console.error('Direct message users error:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.get('/api/direct-messages/:userId', verifyToken, async (req, res) => {
+  try {
+    const otherUserId = toNonNegativeInteger(Number(req.params.userId), null);
+    if (!otherUserId || otherUserId === req.userId) return res.status(400).json({ error: 'Utilisateur invalide' });
+    const otherUser = await dbGet('SELECT id, fname, lname, email, role, status FROM users WHERE id = ?', [otherUserId]);
+    if (!otherUser || otherUser.status !== 'Actif') return res.status(404).json({ error: 'Utilisateur introuvable' });
+
+    await dbRun('UPDATE direct_messages SET isRead = 1 WHERE senderId = ? AND recipientId = ?', [otherUserId, req.userId]);
+    const rows = await dbAll(`
+      SELECT dm.*,
+             s.fname as senderFname, s.lname as senderLname, s.role as senderRole,
+             r.fname as recipientFname, r.lname as recipientLname, r.role as recipientRole
+      FROM direct_messages dm
+      LEFT JOIN users s ON s.id = dm.senderId
+      LEFT JOIN users r ON r.id = dm.recipientId
+      WHERE (dm.senderId = ? AND dm.recipientId = ?)
+         OR (dm.senderId = ? AND dm.recipientId = ?)
+      ORDER BY dm.dateCreated ASC, dm.id ASC
+      LIMIT 200
+    `, [req.userId, otherUserId, otherUserId, req.userId]);
+    res.json({ user: otherUser, messages: rows.map(mapDirectMessage) });
+  } catch (e) {
+    console.error('Direct messages fetch error:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
+app.post('/api/direct-messages', verifyToken, async (req, res) => {
+  try {
+    const recipientId = toNonNegativeInteger(Number(req.body.recipientId), null);
+    const message = normalizeText(req.body.message);
+    if (!recipientId || recipientId === req.userId) return res.status(400).json({ error: 'Destinataire invalide' });
+    if (!message) return res.status(400).json({ error: 'Message requis' });
+    if (message.length > 1200) return res.status(400).json({ error: 'Message trop long' });
+    const recipient = await dbGet('SELECT id, status FROM users WHERE id = ?', [recipientId]);
+    if (!recipient || recipient.status !== 'Actif') return res.status(404).json({ error: 'Destinataire introuvable' });
+
+    const result = await dbRun('INSERT INTO direct_messages (senderId, recipientId, message) VALUES (?,?,?)', [req.userId, recipientId, message]);
+    const row = await dbGet(`
+      SELECT dm.*,
+             s.fname as senderFname, s.lname as senderLname, s.role as senderRole,
+             r.fname as recipientFname, r.lname as recipientLname, r.role as recipientRole
+      FROM direct_messages dm
+      LEFT JOIN users s ON s.id = dm.senderId
+      LEFT JOIN users r ON r.id = dm.recipientId
+      WHERE dm.id = ?
+    `, [result.lastID]);
+    const payload = mapDirectMessage(row);
+    await logAudit(req.userId, 'MESSAGE', 'direct_messages', result.lastID, `Message direct envoyé à l'utilisateur ${recipientId}`);
+    emitRealtimeEvent('direct-message:new', payload, { toUserId: recipientId });
+    emitRealtimeEvent('direct-message:sent', payload, { toUserId: req.userId });
+    res.status(201).json({ message: payload });
+  } catch (e) {
+    console.error('Direct message create error:', e);
+    res.status(500).json({ error: 'Erreur serveur' });
+  }
+});
+
 // NOTIFICATION PREFERENCES
 app.get('/api/notification-preferences', verifyToken, async (req, res) => {
   try {
@@ -3012,7 +3134,7 @@ TU PEUX EXÉCUTER DES ACTIONS pour l'utilisateur grâce à tes outils (tools). Q
 Capacités:
 - Créer/lister des événements (utilise create_event, list_events)
 - Lister et réserver des salles (utilise list_rooms, reserve_room)
-- Ajouter/lister des invités (utilise add_guest, list_guests)
+- Ajouter/lister/supprimer des invités (utilise add_guest, list_guests, delete_guest)
 - Demander des services (utilise request_service, list_services)
 - Générer des factures (utilise generate_invoice)
 - Consulter les rapports (utilise get_report_summary)
@@ -3060,7 +3182,12 @@ const CHAT_TOOLS = [
     function: {
       name: 'list_events',
       description: "Lister les événements de l'utilisateur. Retourne la liste des événements avec leurs détails.",
-      parameters: { type: 'object', properties: {} }
+      parameters: {
+        type: 'object',
+        properties: {
+          activeOnly: { type: 'boolean', description: 'true pour lister seulement les événements actifs' }
+        }
+      }
     }
   },
   {
@@ -3126,6 +3253,21 @@ const CHAT_TOOLS = [
         properties: {
           eventId: { type: 'string', description: "ID d'événement" },
           search: { type: 'string', description: 'Recherche nom/courriel' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_guest',
+      description: "Supprimer un invité par ID ou par recherche nom/courriel. Vérifie les droits d'accès avant suppression.",
+      parameters: {
+        type: 'object',
+        properties: {
+          guestId: { type: 'string', description: "ID de l'invité à supprimer" },
+          search: { type: 'string', description: "Nom, prénom ou courriel de l'invité à supprimer" },
+          eventId: { type: 'string', description: "ID d'événement optionnel pour préciser la recherche" }
         }
       }
     }
@@ -3221,17 +3363,20 @@ async function executeChatTool(toolName, args, userId, userRole) {
         [name, type || null, date || null, time || null, endTime || null, budget, guests, description || null, status, userId]
       );
       await logAudit(userId, 'CREATE', 'events', result.lastID, `Événement créé via IA: ${name}`);
+      await createNotification(userId, 'Événement créé', `"${name}" a été créé via le concierge IA.`, 'success');
       await notifyRole('coordonnateur', 'Nouvel événement', `"${name}" a été créé via le concierge IA.`, 'info');
       const event = await dbGet('SELECT * FROM events WHERE id = ?', [result.lastID]);
       return { success: true, action: 'create_event', event };
     }
 
     case 'list_events': {
+      const activeOnly = args.activeOnly === true || args.activeOnly === 'true' || args.status === 'active';
+      const activeClause = activeOnly ? " AND status NOT IN ('Annulé','Terminé')" : '';
       let events;
       if (userRole === 'admin' || userRole === 'coordonnateur') {
-        events = await dbAll('SELECT id, name, type, date, time, status, budget, guests FROM events ORDER BY date DESC LIMIT 20');
+        events = await dbAll(`SELECT id, name, type, date, time, status, budget, guests FROM events WHERE 1=1${activeClause} ORDER BY date DESC LIMIT 20`);
       } else {
-        events = await dbAll('SELECT id, name, type, date, time, status, budget, guests FROM events WHERE userId = ? ORDER BY date DESC LIMIT 20', [userId]);
+        events = await dbAll(`SELECT id, name, type, date, time, status, budget, guests FROM events WHERE userId = ?${activeClause} ORDER BY date DESC LIMIT 20`, [userId]);
       }
       return { success: true, action: 'list_events', count: events.length, events };
     }
@@ -3320,6 +3465,49 @@ async function executeChatTool(toolName, args, userId, userRole) {
       sql += ' ORDER BY g.dateCreated DESC LIMIT 30';
       const guests = await dbAll(sql, params);
       return { success: true, action: 'list_guests', count: guests.length, guests };
+    }
+
+    case 'delete_guest': {
+      let guest = null;
+      if (args.guestId) {
+        guest = await dbGet(`
+          SELECT g.*, e.userId as eventOwnerId, e.name as eventName
+          FROM guests g LEFT JOIN events e ON g.eventId = e.id
+          WHERE g.id = ?
+        `, [toInt(args.guestId)]);
+      } else if (args.search) {
+        const params = [`%${args.search}%`, `%${args.search}%`, `%${args.search}%`, `%${args.search}%`];
+        let sql = `
+          SELECT g.*, e.userId as eventOwnerId, e.name as eventName
+          FROM guests g LEFT JOIN events e ON g.eventId = e.id
+          WHERE (g.fname LIKE ? OR g.lname LIKE ? OR g.email LIKE ? OR (g.fname || ' ' || g.lname) LIKE ?)
+        `;
+        if (args.eventId) {
+          sql += ' AND g.eventId = ?';
+          params.push(toInt(args.eventId));
+        }
+        if (!isOperationalRole(userRole)) {
+          sql += ' AND (g.userId = ? OR e.userId = ?)';
+          params.push(userId, userId);
+        }
+        sql += ' ORDER BY g.dateCreated DESC LIMIT 2';
+        const matches = await dbAll(sql, params);
+        if (matches.length > 1) {
+          return {
+            success: false,
+            error: `Plusieurs invités correspondent: ${matches.map((item) => `${item.fname} ${item.lname} (#${item.id})`).join(', ')}. Donnez l'ID exact de l'invité.`
+          };
+        }
+        guest = matches[0] || null;
+      }
+      if (!guest) return { success: false, error: 'Invité non trouvé' };
+      if (!isOperationalRole(userRole) && guest.userId !== userId && guest.eventOwnerId !== userId) {
+        return { success: false, error: 'Accès refusé' };
+      }
+      await dbRun('DELETE FROM guests WHERE id = ?', [guest.id]);
+      await logAudit(userId, 'DELETE', 'guests', guest.id, `Invité supprimé via IA: ${guest.fname} ${guest.lname}`);
+      await createNotification(userId, 'Invité supprimé', `${guest.fname} ${guest.lname} a été supprimé via le concierge IA.`, 'success');
+      return { success: true, action: 'delete_guest', guestId: guest.id, name: `${guest.fname} ${guest.lname}`, eventId: guest.eventId };
     }
 
     case 'request_service': {
@@ -3640,41 +3828,90 @@ function formatAutomationReply(toolName, result) {
   switch (toolName) {
     case 'list_rooms':
       return result.rooms.length
-        ? `Mode automatique activé. Voici les salles disponibles: ${result.rooms.slice(0, 6).map((room) => `${room.name} (${room.capacity} pers, ${formatCad(room.hourlyRate)}/h)`).join(' ; ')}.`
-        : 'Mode automatique activé. Aucune salle ne correspond à la demande.';
+        ? `Voici les salles disponibles: ${result.rooms.slice(0, 6).map((room) => `${room.name} (${room.capacity} pers, ${formatCad(room.hourlyRate)}/h)`).join(' ; ')}.`
+        : 'Aucune salle ne correspond à la demande.';
     case 'list_events':
       return result.events.length
-        ? `Mode automatique activé. Voici les événements visibles: ${result.events.slice(0, 6).map((event) => `${event.name} le ${event.date || 'date à confirmer'} (${event.status})`).join(' ; ')}.`
-        : 'Mode automatique activé. Aucun événement trouvé.';
+        ? `Voici les événements visibles: ${result.events.slice(0, 6).map((event) => `${event.name} le ${event.date || 'date à confirmer'} (${event.status})`).join(' ; ')}.`
+        : 'Aucun événement trouvé.';
     case 'get_notifications':
       return result.notifications.length
-        ? `Mode automatique activé. Notifications récentes: ${result.notifications.slice(0, 5).map((item) => item.title).join(' ; ')}.`
-        : 'Mode automatique activé. Aucune notification récente.';
+        ? `Notifications récentes: ${result.notifications.slice(0, 5).map((item) => item.title).join(' ; ')}.`
+        : 'Aucune notification récente.';
     case 'get_team_summary':
-      return `Mode automatique activé. L'équipe compte ${result.active} membre(s) actif(s) sur ${result.total} compte(s). Répartition active: ${result.byRole.map((row) => `${row.role}: ${row.count}`).join(' ; ') || 'aucun compte actif'}.`;
+      return `L'équipe compte ${result.active} membre(s) actif(s) sur ${result.total} compte(s). Répartition active: ${result.byRole.map((row) => `${row.role}: ${row.count}`).join(' ; ') || 'aucun compte actif'}.`;
     case 'get_report_summary':
-      return `Mode automatique activé. ${result.events.total} événements au total, ${result.events.active} actifs, ${result.guests.confirmed} invités confirmés, ${formatCad(result.revenue.paid)} encaissés et ${formatCad(result.revenue.pending)} en attente.`;
+      return `${result.events.total} événements au total, ${result.events.active} actifs, ${result.guests.confirmed} invités confirmés, ${formatCad(result.revenue.paid)} encaissés et ${formatCad(result.revenue.pending)} en attente.`;
     case 'create_event':
-      return `Mode automatique activé. L'événement ${result.event.name} a été créé avec l'identifiant ${result.event.id} pour le ${result.event.date || 'date à confirmer'}.`;
+      return `L'événement ${result.event.name} a été créé avec l'identifiant ${result.event.id} pour le ${result.event.date || 'date à confirmer'}.`;
     case 'reserve_room':
-      return `Mode automatique activé. ${result.room} a été réservée le ${result.date} de ${result.startTime} à ${result.endTime} pour ${formatCad(result.cost)}.`;
+      return `${result.room} a été réservée le ${result.date} de ${result.startTime} à ${result.endTime} pour ${formatCad(result.cost)}.`;
     case 'generate_invoice':
-      return `Mode automatique activé. La facture ${result.number} a été générée pour ${formatCad(result.total)} avec échéance au ${result.dueDate}.`;
+      return `La facture ${result.number} a été générée pour ${formatCad(result.total)} avec échéance au ${result.dueDate}.`;
     case 'request_service':
-      return `Mode automatique activé. Le service ${result.name} a été demandé pour l'événement ${result.eventId}${result.cost ? `, coût estimé ${formatCad(result.cost)}` : ''}.`;
+      return `Le service ${result.name} a été demandé pour l'événement ${result.eventId}${result.cost ? `, coût estimé ${formatCad(result.cost)}` : ''}.`;
     case 'add_guest':
-      return `Mode automatique activé. L'invité ${result.name} a été ajouté à l'événement ${result.eventId}.`;
+      return `L'invité ${result.name} a été ajouté à l'événement ${result.eventId}.`;
+    case 'list_guests':
+      return result.guests.length
+        ? `Voici les invités visibles: ${result.guests.slice(0, 8).map((guest) => `${guest.fname} ${guest.lname}${guest.eventName ? ` (${guest.eventName})` : ''}`).join(' ; ')}.`
+        : 'Aucun invité trouvé.';
+    case 'delete_guest':
+      return `L'invité ${result.name} a été supprimé.`;
     default:
-      return 'Mode automatique activé. Action exécutée avec succès.';
+      return 'Action exécutée avec succès.';
   }
 }
 
 function buildRescueReply(messages = []) {
   const latest = findLatestUserMessage(messages);
   const intent = latest
-    ? `Je reste disponible pour une demande operationnelle a partir de: "${String(latest).slice(0, 90)}".`
-    : 'Je reste disponible pour une demande operationnelle.';
-  return `Mode concierge de secours active. ${intent} Donnez une action concrete comme lister les salles, creer un evenement, reserver une salle, ajouter un invite, demander un service, generer une facture ou resumer les notifications et rapports.`;
+    ? `Je peux continuer à partir de votre demande: "${String(latest).slice(0, 90)}".`
+    : 'Je peux continuer avec une demande opérationnelle.';
+  return `${intent} Précisez une action concrète: lister les salles, créer un événement, réserver une salle, ajouter un invité, demander un service, générer une facture ou résumer les notifications et rapports.`;
+}
+
+function wantsEventNames(text) {
+  return /\b(nom|noms|liste|lister|affiche|afficher|montre|montrer|voir|quels?|quelles?)\b/.test(text);
+}
+
+function wantsEventCount(text) {
+  return /\b(combien|nombre|total|statistique|stats?)\b/.test(text);
+}
+
+function parseAutomationDate(raw = '') {
+  const iso = String(raw).match(/\b\d{4}-\d{2}-\d{2}\b/);
+  if (iso) return iso[0];
+  const dmy = String(raw).match(/\b(\d{2})[-/](\d{2})[-/](\d{4})\b/);
+  if (dmy) return `${dmy[3]}-${dmy[2]}-${dmy[1]}`;
+  return null;
+}
+
+async function resolveRoomIdFromAutomation(raw = '', text = '') {
+  const roomIdMatch = text.match(/salle\s*(\d+)/);
+  if (roomIdMatch) return roomIdMatch[1];
+
+  const roomNameMatch = normalizeAutomationText(raw).match(/salle\s+([a-z0-9' -]+?)(?:\s+pour|\s+le|\s+de\s+\d|\s+a\s+\d|\s+à\s+\d|$)/);
+  const roomNeedle = roomNameMatch ? roomNameMatch[1].trim() : '';
+  if (!roomNeedle) return null;
+
+  const rooms = await dbAll('SELECT id, name FROM rooms');
+  const normalizedNeedle = normalizeAutomationText(roomNeedle);
+  const match = rooms.find((room) => {
+    const normalizedName = normalizeAutomationText(room.name);
+    return normalizedName.includes(normalizedNeedle) || normalizedNeedle.includes(normalizedName.replace(/^salle\s+/, ''));
+  });
+  return match ? String(match.id) : null;
+}
+
+function shouldTryAutomationBeforeLlm(messages = []) {
+  const text = normalizeAutomationText(findLatestUserMessage(messages));
+  if (!text) return false;
+  return /\b(notification|notifications|equipe|team|utilisateur|utilisateurs|membre|membres|staff|personnel|evenement|evenements|rapport|statistique|revenu|dashboard|resume|salle|salles|room|rooms|facture|reservation|reserver|reserve|service|traiteur|deco|decoration|dj|photo|invite|invites)\b/.test(text);
+}
+
+function automationGuidance(reply) {
+  return { reply, actions: [], automated: true, degraded: true };
 }
 
 async function runAutomationFallback(messages, userId, userRole) {
@@ -3689,45 +3926,12 @@ async function runAutomationFallback(messages, userId, userRole) {
     toolName = 'get_notifications';
   } else if (/\b(equipe|team|utilisateur|utilisateurs|membre|membres|staff|personnel)\b/.test(text) && /\b(actif|active|actifs|combien|nombre|total|statistique|stats?)\b/.test(text)) {
     toolName = 'get_team_summary';
-  } else if (/\b(evenement|evenements)\b/.test(text) && /\b(combien|nombre|total|actif|actifs|statistique|stats?)\b/.test(text)) {
-    toolName = 'get_report_summary';
-  } else if (/\b(rapport|statistique|revenu|dashboard|resume)\b/.test(text)) {
-    toolName = 'get_report_summary';
-  } else if (/\b(salle|salles|room|rooms)\b/.test(text) && /(disponib|liste|lister|affiche|afficher|montre|montrer|quelle|quelles|voir|salles)/.test(text)) {
-    toolName = 'list_rooms';
-    const capacityMatch = text.match(/(\d+)\s*(personnes|pers|invites)/);
-    if (capacityMatch) args.capacity = capacityMatch[1];
-  } else if (/\b(evenement|evenements)\b/.test(text) && /(liste|lister|affiche|afficher|montre|montrer|mes|quel|quels|voir)/.test(text)) {
-    toolName = 'list_events';
-  } else if (/\bfacture\b/.test(text) && /\b(gener|cree)\b/.test(text)) {
-    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
-    if (!eventIdMatch) {
-      return { reply: 'Mode automatique: indiquez l identifiant de l événement pour générer la facture.', actions: [] };
-    }
-    toolName = 'generate_invoice';
-    args.eventId = eventIdMatch[1];
-  } else if (/\b(reserv|reserve)\b/.test(text) && /\bsalle\b/.test(text)) {
-    const roomIdMatch = text.match(/salle\s*(\d+)/);
-    const dateMatch = raw.match(/\b\d{4}-\d{2}-\d{2}\b/);
-    const times = raw.match(/\b\d{2}:\d{2}\b/g) || [];
-    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
-    if (!roomIdMatch || !dateMatch || times.length < 2) {
-      return { reply: 'Mode automatique: pour réserver une salle, indiquez la salle, la date et les heures de début et fin au format YYYY-MM-DD et HH:MM.', actions: [] };
-    }
-    toolName = 'reserve_room';
-    args = {
-      roomId: roomIdMatch[1],
-      eventId: eventIdMatch ? eventIdMatch[1] : undefined,
-      date: dateMatch[0],
-      startTime: times[0],
-      endTime: times[1]
-    };
-  } else if (/\b(cree|creer|ajoute)\b/.test(text) && /\bevenement\b/.test(text)) {
+  } else if ((/\b(cree|creer)\b/.test(text) || (/\bajoute\b/.test(text) && !/\binvites?\b/.test(text))) && /\bevenement\b/.test(text)) {
     const dateMatch = raw.match(/\b\d{4}-\d{2}-\d{2}\b/);
     const times = raw.match(/\b\d{2}:\d{2}\b/g) || [];
     const nameMatch = raw.match(/(?:événement|evenement|event)\s+(.+?)(?:\s+le\s+\d{4}-\d{2}-\d{2}|$)/i);
     if (!nameMatch) {
-      return { reply: 'Mode automatique: donnez au moins le nom de l événement, par exemple "Créer un événement Gala Signature le 2026-05-20 à 18:00".', actions: [] };
+      return automationGuidance('Donnez au moins le nom de l événement, par exemple "Créer un événement Gala Signature le 2026-05-20 à 18:00".');
     }
     toolName = 'create_event';
     args = {
@@ -3736,21 +3940,80 @@ async function runAutomationFallback(messages, userId, userRole) {
       time: times[0],
       endTime: times[1]
     };
+  } else if (/\b(evenement|evenements)\b/.test(text) && wantsEventNames(text) && !/\binvites?\b/.test(text)) {
+    toolName = 'list_events';
+    if (/\b(actif|active|actifs|actives)\b/.test(text)) args.activeOnly = true;
+  } else if (/\b(evenement|evenements)\b/.test(text) && wantsEventCount(text) && !/\binvites?\b/.test(text)) {
+    toolName = 'get_report_summary';
+  } else if (/\b(rapport|statistique|revenu|dashboard|resume)\b/.test(text)) {
+    toolName = 'get_report_summary';
+  } else if (/\b(reserve|reserver|reservation|reserv)\b/.test(text) && /\bsalle\b/.test(text)) {
+    const roomId = await resolveRoomIdFromAutomation(raw, text);
+    const date = parseAutomationDate(raw);
+    const times = raw.match(/\b\d{1,2}:\d{2}\b/g) || [];
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
+    const missing = [];
+    if (!roomId) missing.push('la salle exacte');
+    if (!date) missing.push('la date au format YYYY-MM-DD ou DD-MM-YYYY');
+    if (times.length < 2) missing.push('les heures de début et de fin');
+    if (missing.length) {
+      return automationGuidance(`Pour réserver une salle, il manque: ${missing.join(', ')}. Exemple: "Réserver salle Montréal le 2026-04-29 de 14:00 à 17:00".`);
+    }
+    toolName = 'reserve_room';
+    args = {
+      roomId,
+      eventId: eventIdMatch ? eventIdMatch[1] : undefined,
+      date,
+      startTime: times[0].padStart(5, '0'),
+      endTime: times[1].padStart(5, '0')
+    };
+  } else if (/\b(salle|salles|room|rooms)\b/.test(text) && /(disponib|liste|lister|affiche|afficher|montre|montrer|quelle|quelles|voir|salles)/.test(text)) {
+    toolName = 'list_rooms';
+    const capacityMatch = text.match(/(\d+)\s*(personnes|pers|invites)/);
+    if (capacityMatch) args.capacity = capacityMatch[1];
+  } else if (/\bfacture\b/.test(text) && /\b(gener|cree)\b/.test(text)) {
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
+    if (!eventIdMatch) {
+      return automationGuidance('Indiquez l identifiant de l événement pour générer la facture.');
+    }
+    toolName = 'generate_invoice';
+    args.eventId = eventIdMatch[1];
   } else if (/\b(service|traiteur|deco|decoration|dj|photo)\b/.test(text) && /\b(demande|ajoute|cree)\b/.test(text)) {
     const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
     if (!eventIdMatch) {
-      return { reply: 'Mode automatique: indiquez l identifiant de l événement pour demander un service.', actions: [] };
+      return automationGuidance('Indiquez l identifiant de l événement pour demander un service.');
     }
     toolName = 'request_service';
     args = {
       eventId: eventIdMatch[1],
       name: raw.replace(/.*(service|traiteur|décoration|decoration|dj|photo)/i, '$1').trim() || 'Service personnalisé'
     };
-  } else if (/\binvite\b/.test(text) && /\b(ajoute|creer|cree)\b/.test(text)) {
+  } else if (/\binvites?\b/.test(text) && /\b(supprime|supprimer|efface|effacer|retire|retirer|delete)\b/.test(text)) {
     const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
-    const personMatch = raw.match(/invite\s+([A-Za-z' -]+)\s+([A-Za-z' -]+)(:\s+pour|\s+sur|\s+event|\s+evenement|$)/i);
+    const guestIdMatch = text.match(/(?:invite|guest)\s*(?:#|id)?\s*(\d+)/);
+    const guestSearchText = raw.replace(/\s+(?:event|evenement)\s*\d+.*/i, '').replace(/\s+(?:sur|dans)\s+.+$/i, '').trim();
+    const personMatch = guestSearchText.match(/invit[ée]?\s+([A-Za-zÀ-ÿ0-9' -]+?)(?:\s+#|\s+id|$)/i);
+    if (!guestIdMatch && !personMatch) {
+      return automationGuidance("Pour supprimer un invité, indiquez son nom ou son ID, par exemple \"Supprimer l'invité Marc Gagné\".");
+    }
+    toolName = 'delete_guest';
+    args = {
+      guestId: guestIdMatch ? guestIdMatch[1] : undefined,
+      search: !guestIdMatch && personMatch ? personMatch[1].trim() : undefined,
+      eventId: eventIdMatch ? eventIdMatch[1] : undefined
+    };
+  } else if (/\binvites?\b/.test(text) && /\b(liste|lister|affiche|afficher|montre|montrer|voir|quels?|quelles?)\b/.test(text)) {
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
+    toolName = 'list_guests';
+    args = {
+      eventId: eventIdMatch ? eventIdMatch[1] : undefined
+    };
+  } else if (/\binvites?\b/.test(text) && /\b(ajoute|ajouter|creer|cree)\b/.test(text)) {
+    const eventIdMatch = text.match(/(?:evenement|event)\s*(\d+)/);
+    const guestNameText = raw.replace(/\s+(?:event|evenement)\s*\d+.*/i, '').replace(/\s+(?:sur|dans)\s+.+$/i, '').trim();
+    const personMatch = guestNameText.match(/invit[ée]?\s+([A-Za-zÀ-ÿ0-9'-]+)\s+([A-Za-zÀ-ÿ0-9' -]+)$/i);
     if (!eventIdMatch || !personMatch) {
-      return { reply: 'Mode automatique: pour ajouter un invité, indiquez son prénom, son nom et l identifiant de l événement.', actions: [] };
+      return automationGuidance('Pour ajouter un invité, indiquez son prénom, son nom et l identifiant de l événement.');
     }
     toolName = 'add_guest';
     args = {
@@ -3795,6 +4058,11 @@ app.post('/api/chat', verifyToken, async (req, res) => {
       if (automated) return res.json(automated);
       return res.status(503).json({ error: 'Service IA non configuré. Ajoutez GEMINI_API_KEY ou GROQ_API_KEY dans .env' });
     }
+
+    const localOperationalReply = shouldTryAutomationBeforeLlm(messages)
+      ? await runAutomationFallback(messages, req.userId, req.userRole)
+      : null;
+    if (localOperationalReply) return res.json(localOperationalReply);
 
     // Gather user context
     const user = await dbGet('SELECT fname, lname, role FROM users WHERE id = ?', [req.userId]);
@@ -3850,17 +4118,14 @@ app.post('/api/chat', verifyToken, async (req, res) => {
     if (executedActions.length > 0) {
       const lastAction = executedActions[executedActions.length - 1];
       return res.json({
-        reply: `Mode de secours activé. ${formatAutomationReply(lastAction.action, lastAction)}`,
+        reply: formatAutomationReply(lastAction.action, lastAction),
         actions: executedActions,
         automated: true
       });
     }
     const automated = await runAutomationFallback(req.body.messages || [], req.userId, req.userRole).catch(() => null);
     if (automated) return res.json(automated);
-    const msg = e.message && (e.message.includes('indisponible') || e.message.includes('configuré'))
-      ? e.message
-      : 'Désolé, le service IA est temporairement indisponible. Réessayez dans un moment.';
-    res.json({ reply: msg, actions: [], automated: true, degraded: true });
+    res.json({ reply: buildRescueReply(req.body.messages || []), actions: [], automated: true, degraded: true });
   }
 });
 

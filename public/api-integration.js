@@ -261,6 +261,9 @@ async function fetchPayments() { return apiRequest('/payments'); }
 async function fetchNotifications() { return apiRequest('/notifications'); }
 async function markNotificationRead(id) { return apiRequest(`/notifications/${id}/read`, 'PUT'); }
 async function markAllNotificationsRead() { return apiRequest('/notifications/read-all', 'PUT'); }
+async function fetchDirectMessageUsers() { return apiRequest('/direct-messages/users'); }
+async function fetchDirectMessages(userId) { return apiRequest(`/direct-messages/${userId}`); }
+async function sendDirectMessage(recipientId, message) { return apiRequest('/direct-messages', 'POST', { recipientId, message }); }
 async function fetchNotifPreferences() { return apiRequest('/notification-preferences'); }
 async function updateNotifPreferences(prefs) { return apiRequest('/notification-preferences', 'PUT', prefs); }
 async function fetchSettings() { return apiRequest('/settings'); }
@@ -361,6 +364,9 @@ Object.assign(window, {
   fetchNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  fetchDirectMessageUsers,
+  fetchDirectMessages,
+  sendDirectMessage,
   fetchNotifPreferences,
   updateNotifPreferences,
   fetchSettings,

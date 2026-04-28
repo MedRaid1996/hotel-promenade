@@ -85,7 +85,8 @@ test('chat falls back to automation without exposing quota or timeout language',
   });
 
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
-  assert.match(result.body.reply, /Mode automatique|Mode concierge de secours/i);
+  assert.match(result.body.reply, /Notifications r.centes|Aucune notification|Je peux continuer/i);
+  assert.doesNotMatch(result.body.reply, /Mode automatique|Mode concierge de secours/i);
   assert.doesNotMatch(result.body.reply, /token|timeout|trop de temps|rate limit/i);
 });
 
@@ -105,8 +106,8 @@ test('chat fallback executes French room listing requests without provider keys'
 
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
   assert.equal(result.body.automated, true);
-  assert.match(result.body.reply, /Mode automatique activé/i);
   assert.match(result.body.reply, /Salle Versailles|Grand Salon|Montréal/i);
+  assert.doesNotMatch(result.body.reply, /Mode automatique/i);
 });
 
 test('chat returns a graceful rescue reply for non-automatable requests when providers are unavailable', async () => {
@@ -124,8 +125,105 @@ test('chat returns a graceful rescue reply for non-automatable requests when pro
   });
 
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
-  assert.match(result.body.reply, /Mode concierge de secours active/i);
+  assert.match(result.body.reply, /Je peux continuer/i);
+  assert.doesNotMatch(result.body.reply, /Mode concierge de secours/i);
   assert.doesNotMatch(result.body.reply, /token|timeout|trop de temps|rate limit/i);
+});
+
+test('chat asks for missing guest details instead of exposing provider unavailability', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+
+  const result = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Ajoute un invite' }]
+    })
+  });
+
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.automated, true);
+  assert.match(result.body.reply, /ajouter un invit|identifiant/i);
+  assert.doesNotMatch(result.body.reply, /indisponible|trop de temps|timeout|rate limit/i);
+});
+
+test('chat treats incomplete room reservation as reservation intent, not room listing', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+
+  const result = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'reserve test dans salle montreal pour le 29-04-2026' }]
+    })
+  });
+
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.automated, true);
+  assert.match(result.body.reply, /heures de début et de fin|14:00.*17:00/i);
+  assert.doesNotMatch(result.body.reply, /Voici les salles disponibles/i);
+  assert.doesNotMatch(result.body.reply, /Salle Versailles.*Salle Montréal/i);
+});
+
+test('chat lists active event names instead of confusing name with count', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+  const stamp = Date.now();
+  const eventName = `Nom Actif Concierge ${stamp}`;
+
+  const created = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: `Creer un evenement ${eventName} le 2026-06-10 a 10:00` }]
+    })
+  });
+
+  assert.equal(created.response.status, 200, JSON.stringify(created.body));
+  assert.equal(created.body.automated, true);
+  assert.match(created.body.reply, /a été créé|a .t. cr/i);
+  const eventId = created.body.actions?.[0]?.event?.id;
+  assert.ok(eventId, JSON.stringify(created.body));
+
+  const notifications = await api('/api/notifications', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  assert.equal(notifications.response.status, 200, JSON.stringify(notifications.body));
+  assert.ok(
+    notifications.body.notifications.some((item) => item.title === 'Événement créé' && item.body.includes(eventName)),
+    JSON.stringify(notifications.body.notifications)
+  );
+
+  const result = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Donne moi le nom des evenements actifs' }]
+    })
+  });
+
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.automated, true);
+  assert.match(result.body.reply, new RegExp(eventName, 'i'));
+  assert.doesNotMatch(result.body.reply, /événements au total/i);
+  assert.doesNotMatch(result.body.reply, /Mode automatique/i);
+
+  const deleted = await api(`/api/events/${eventId}`, {
+    method: 'DELETE',
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  assert.equal(deleted.response.status, 200, JSON.stringify(deleted.body));
 });
 
 test('chat fallback reports active team count from the database', async () => {
@@ -165,6 +263,7 @@ test('chat fallback creates events and reports the right total', async () => {
     assert.equal(created.response.status, 200, JSON.stringify(created.body));
     assert.equal(created.body.automated, true);
     assert.match(created.body.reply, /a été créé/i);
+    assert.doesNotMatch(created.body.reply, /Mode automatique/i);
   }
 
   const count = await api('/api/chat', {
@@ -174,11 +273,82 @@ test('chat fallback creates events and reports the right total', async () => {
       'Authorization': `Bearer ${token}`
     },
     body: JSON.stringify({
-      messages: [{ role: 'user', content: 'Combien d événements au total ?' }]
+      messages: [{ role: 'user', content: 'Combien d événements actifs ?' }]
     })
   });
 
   assert.equal(count.response.status, 200, JSON.stringify(count.body));
   assert.equal(count.body.automated, true);
-  assert.match(count.body.reply, /3 événements au total/i);
+  assert.match(count.body.reply, /3 actifs/i);
+  assert.doesNotMatch(count.body.reply, /Mode automatique/i);
+});
+
+test('chat fallback can list and delete an invited guest by name', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+  const stamp = Date.now();
+  const eventName = `Invite Delete Event ${stamp}`;
+  const guestFirst = `Alice${stamp}`;
+  const guestLast = 'Suppression';
+
+  const created = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: `Creer un evenement ${eventName} le 2026-07-10 a 11:00` }]
+    })
+  });
+  assert.equal(created.response.status, 200, JSON.stringify(created.body));
+  const eventId = created.body.actions?.[0]?.event?.id;
+  assert.ok(eventId, JSON.stringify(created.body));
+
+  const added = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: `Ajoute invite ${guestFirst} ${guestLast} evenement ${eventId}` }]
+    })
+  });
+  assert.equal(added.response.status, 200, JSON.stringify(added.body));
+  assert.equal(added.body.automated, true);
+  assert.match(added.body.reply, new RegExp(`${guestFirst} ${guestLast}`, 'i'));
+
+  const listed = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: `Liste les invites evenement ${eventId}` }]
+    })
+  });
+  assert.equal(listed.response.status, 200, JSON.stringify(listed.body));
+  assert.equal(listed.body.automated, true);
+  assert.match(listed.body.reply, new RegExp(`${guestFirst} ${guestLast}`, 'i'));
+
+  const deleted = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: `Supprime invite ${guestFirst} ${guestLast} evenement ${eventId}` }]
+    })
+  });
+  assert.equal(deleted.response.status, 200, JSON.stringify(deleted.body));
+  assert.equal(deleted.body.automated, true);
+  assert.match(deleted.body.reply, /a Ã©tÃ© supprim|a .t. supprim/i);
+
+  const guests = await api('/api/guests', {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  assert.equal(guests.response.status, 200, JSON.stringify(guests.body));
+  assert.ok(!guests.body.guests.some((guest) => guest.fname === guestFirst && guest.lname === guestLast));
 });

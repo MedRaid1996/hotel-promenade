@@ -10,6 +10,7 @@ process.env.DB_PATH = dbPath;
 process.env.BOOTSTRAP_ADMIN_EMAIL = 'admin@lapromenade.com';
 process.env.BOOTSTRAP_ADMIN_PASSWORD = 'AdminTestPass123!';
 process.env.ENABLE_DEMO_USERS = 'false';
+process.env.DISABLE_RATE_LIMIT = 'true';
 
 const { startServer, db } = require('../server.js');
 
@@ -151,6 +152,62 @@ test('users cannot access another organizer event detail', async () => {
     headers: { 'Authorization': `Bearer ${visitorToken}` }
   });
   assert.equal(denied.response.status, 403);
+});
+
+test('active users can exchange direct messages', async () => {
+  const stamp = Date.now();
+  await registerUser({
+    fname: 'Message',
+    lname: 'Sender',
+    email: `message.sender.${stamp}@example.com`,
+    password: 'SenderPass123!'
+  });
+  await registerUser({
+    fname: 'Message',
+    lname: 'Receiver',
+    email: `message.receiver.${stamp}@example.com`,
+    password: 'ReceiverPass123!'
+  });
+
+  const senderToken = await login(`message.sender.${stamp}@example.com`, 'SenderPass123!');
+  const receiverToken = await login(`message.receiver.${stamp}@example.com`, 'ReceiverPass123!');
+
+  const users = await api('/api/direct-messages/users', {
+    headers: { 'Authorization': `Bearer ${senderToken}` }
+  });
+  assert.equal(users.response.status, 200, JSON.stringify(users.body));
+  const receiver = users.body.users.find((user) => user.email === `message.receiver.${stamp}@example.com`);
+  assert.ok(receiver, JSON.stringify(users.body));
+
+  const sent = await api('/api/direct-messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${senderToken}`
+    },
+    body: JSON.stringify({ recipientId: receiver.id, message: 'Bonjour, peux-tu vérifier la facture ?' })
+  });
+  assert.equal(sent.response.status, 201, JSON.stringify(sent.body));
+  assert.equal(sent.body.message.message, 'Bonjour, peux-tu vérifier la facture ?');
+
+  const receiverUsers = await api('/api/direct-messages/users', {
+    headers: { 'Authorization': `Bearer ${receiverToken}` }
+  });
+  assert.equal(receiverUsers.response.status, 200, JSON.stringify(receiverUsers.body));
+  assert.equal(receiverUsers.body.unread, 1);
+
+  const thread = await api(`/api/direct-messages/${sent.body.message.senderId}`, {
+    headers: { 'Authorization': `Bearer ${receiverToken}` }
+  });
+  assert.equal(thread.response.status, 200, JSON.stringify(thread.body));
+  assert.equal(thread.body.messages.length, 1);
+  assert.equal(thread.body.messages[0].senderName, 'Message Sender');
+
+  const afterRead = await api('/api/direct-messages/users', {
+    headers: { 'Authorization': `Bearer ${receiverToken}` }
+  });
+  assert.equal(afterRead.response.status, 200, JSON.stringify(afterRead.body));
+  assert.equal(afterRead.body.unread, 0);
 });
 
 test('date and room reservation rules are enforced', async () => {

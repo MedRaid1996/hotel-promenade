@@ -8,6 +8,8 @@ let editingEventId = null;
 let activeModalId = null;
 let modalFocusCleanup = null;
 let lastFocusedBeforeModal = null;
+let directMessageUsers = [];
+let activeDirectMessageUserId = null;
 
 // Chart instances (for cleanup)
 let chartInstances = {};
@@ -373,6 +375,15 @@ function initSocket() {
       updateNotificationBadge();
     });
   });
+
+  socket.on('direct-message:new', (message) => {
+    handleDirectMessageRealtime(message, true);
+  });
+
+  socket.on('direct-message:sent', (message) => {
+    handleDirectMessageRealtime(message, false);
+  });
+
 }
 
 function updateConnectionStatus(connected) {
@@ -653,106 +664,71 @@ function updateChartsTheme() {
 
 /* Section */
 const HOTEL_LOCATION = {
-  lat: 45.5017,  // Montreal coordinates
+  lat: 45.5017,
   lon: -73.5673,
-  city: 'Montréal, QC'
+  city: 'Montréal, QC',
+  address: '123 Avenue La Promenade',
+  timezone: 'America/Toronto'
 };
 
 async function fetchWeather() {
   const container = document.getElementById('weather-widget');
   const headerWeather = document.getElementById('header-weather');
   if (!container && !headerWeather) return;
-  
-  try {
-    // Using Open-Meteo API (free, no key required)
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${HOTEL_LOCATION.lat}&longitude=${HOTEL_LOCATION.lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=America/Toronto`;
-    
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4500);
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
-    if (!response.ok) throw new Error('Weather API error');
-    
-    const data = await response.json();
-    const current = data.current;
-    
-    const weatherInfo = getWeatherInfo(current.weather_code);
-    const temp = Math.round(current.temperature_2m);
-    const feelsLike = Math.round(current.apparent_temperature);
-    const humidity = current.relative_humidity_2m;
-    const windSpeed = Math.round(current.wind_speed_10m);
-    const timeLabel = new Intl.DateTimeFormat('fr-CA', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: 'America/Toronto'
-    }).format(new Date());
 
-    if (headerWeather) {
-      headerWeather.innerHTML = `
-        <div class="weather-chip-icon">${weatherInfo.icon}</div>
+  const now = new Date();
+  const timeLabel = new Intl.DateTimeFormat('fr-CA', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: HOTEL_LOCATION.timezone
+  }).format(now);
+  const dateLabel = new Intl.DateTimeFormat('fr-CA', {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+    timeZone: HOTEL_LOCATION.timezone
+  }).format(now);
+
+  if (headerWeather) {
+    headerWeather.innerHTML = `
+        <div class="weather-chip-icon">⌖</div>
         <div class="weather-chip-copy">
-          <div class="weather-chip-meta">Montréal en direct</div>
+          <div class="weather-chip-meta">Heure locale</div>
           <div class="weather-chip-main">
-            <span class="weather-chip-temp">${temp}°C</span>
-            <span class="weather-chip-desc">${weatherInfo.desc}</span>
+            <span class="weather-chip-temp">${timeLabel}</span>
+            <span class="weather-chip-desc">${HOTEL_LOCATION.city}</span>
           </div>
-          <div class="weather-chip-sub">Ressenti ${feelsLike}°C · ${timeLabel}</div>
+          <div class="weather-chip-sub">${HOTEL_LOCATION.address} · ${dateLabel}</div>
         </div>
-      `;
-    }
-    
-    if (container) {
-      container.innerHTML = `
-        <div class="weather-widget compact">
-          <div class="weather-icon">${weatherInfo.icon}</div>
-          <div class="weather-info">
-            <div class="weather-temp">${temp}°C</div>
-            <div class="weather-desc">${weatherInfo.desc}</div>
-            <div class="weather-location">📍 ${HOTEL_LOCATION.city} · Mise à jour ${timeLabel}</div>
-            <div class="weather-details">
-              <div class="weather-detail">
-                <span class="weather-detail-icon">🌡️</span>
-                <span>Ressenti ${feelsLike}°C</span>
-              </div>
-              <div class="weather-detail">
-                <span class="weather-detail-icon">💧</span>
-                <span>${humidity}%</span>
-              </div>
-              <div class="weather-detail">
-                <span class="weather-detail-icon">🌬️</span>
-                <span>${windSpeed} km/h</span>
-              </div>
+    `;
+  }
+
+  if (container) {
+    container.innerHTML = `
+      <div class="weather-widget compact">
+        <div class="weather-icon">⌖</div>
+        <div class="weather-info">
+          <div class="weather-temp">${timeLabel}</div>
+          <div class="weather-desc">Heure locale de l'hôtel</div>
+          <div class="weather-location">📍 ${HOTEL_LOCATION.address}, ${HOTEL_LOCATION.city}</div>
+          <div class="weather-details">
+            <div class="weather-detail">
+              <span class="weather-detail-icon">◷</span>
+              <span>${dateLabel}</span>
+            </div>
+            <div class="weather-detail">
+              <span class="weather-detail-icon">⌂</span>
+              <span>Réceptions et coordination sur place</span>
             </div>
           </div>
         </div>
-      `;
-    }
-  } catch (err) {
-    if (headerWeather) {
-      headerWeather.innerHTML = `
-        <div class="weather-chip-icon">☁️</div>
-        <div class="weather-chip-copy">
-          <div class="weather-chip-meta">Montréal en direct</div>
-          <div class="weather-chip-main">
-            <span class="weather-chip-temp">--°C</span>
-            <span class="weather-chip-desc">Indisponible</span>
-          </div>
-          <div class="weather-chip-sub">Conditions locales temporairement indisponibles</div>
-        </div>
-      `;
-    }
-    if (container) {
-      container.innerHTML = `
-        <div class="weather-widget compact">
-          <div class="weather-icon">☁️</div>
-          <div class="weather-info">
-            <div class="weather-temp">--°C</div>
-            <div class="weather-desc">Météo non disponible</div>
-            <div class="weather-location">📍 ${HOTEL_LOCATION.city}</div>
-          </div>
-        </div>
-      `;
-    }
+      </div>
+    `;
+  }
+
+  if (!fetchWeather.clockStarted) {
+    fetchWeather.clockStarted = true;
+    setInterval(fetchWeather, 60 * 1000);
   }
 }
 
@@ -900,39 +876,7 @@ function initHotelMap() {
 
 /* Section */
 async function getEventWeatherForecast(eventDate) {
-  if (!eventDate) return null;
-  
-  const today = new Date();
-  const eventDay = new Date(eventDate);
-  const diffDays = Math.ceil((eventDay - today) / (1000 * 60 * 60 * 24));
-  
-  // Open-Meteo only provides 16-day forecast
-  if (diffDays < 0 || diffDays > 16) {
-    return null;
-  }
-  
-  try {
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${HOTEL_LOCATION.lat}&longitude=${HOTEL_LOCATION.lon}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=America/Toronto&forecast_days=16`;
-    
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    
-    const data = await response.json();
-    const dailyIndex = data.daily.time.findIndex(t => t === eventDate);
-    
-    if (dailyIndex === -1) return null;
-    
-    return {
-      date: eventDate,
-      weatherCode: data.daily.weather_code[dailyIndex],
-      tempMax: Math.round(data.daily.temperature_2m_max[dailyIndex]),
-      tempMin: Math.round(data.daily.temperature_2m_min[dailyIndex]),
-      precipProb: data.daily.precipitation_probability_max[dailyIndex]
-    };
-  } catch (err) {
-    console.error('Event weather forecast error:', err);
-    return null;
-  }
+  return null;
 }
 
 function renderEventWeatherBadge(forecast) {
@@ -1285,6 +1229,42 @@ function navigateTo(page) {
   if (p) enhanceInteractiveAccessibility(p);
 }
 
+function openDashboardDestination(destination = {}) {
+  const page = destination.page || 'dashboard';
+  navigateTo(page);
+
+  window.setTimeout(() => {
+    if (destination.tab) {
+      const tab = document.querySelector(`#page-${page} .tab[data-target="${destination.tab}"]`);
+      if (tab) switchTab(tab, destination.tab);
+    }
+
+    if (page === 'events' && destination.status) {
+      const statusFilter = document.getElementById('event-status-filter');
+      if (statusFilter) statusFilter.value = destination.status;
+      renderEvents('', destination.status);
+    }
+
+    if (page === 'guests' && destination.search) {
+      const guestSearch = document.getElementById('guest-search-input');
+      if (guestSearch) guestSearch.value = destination.search;
+      renderGuests(destination.search);
+    }
+
+    if (page === 'billing' && destination.invoiceStatus) {
+      const invoiceStatus = document.getElementById('invoice-status-filter');
+      if (invoiceStatus) invoiceStatus.value = destination.invoiceStatus;
+      renderBilling();
+    }
+
+    if (page === 'users' && destination.search) {
+      const userSearch = document.getElementById('users-search');
+      if (userSearch) userSearch.value = destination.search;
+      renderUsersTable();
+    }
+  }, 0);
+}
+
 function topbarAction() { openEventModal(); }
 
 /* Section */
@@ -1320,54 +1300,85 @@ async function renderDashboard() {
   const heroTitle = document.getElementById('dash-hero-title');
   const heroDesc = document.getElementById('dash-hero-desc');
   const heroKicker = document.getElementById('dash-hero-kicker');
-  if (heroTitle && currentUser) {
-    heroTitle.textContent = `Bonjour, ${currentUser.fname}`;
-  }
-  const heroKickers = {
-    admin: 'Direction de maison',
-    organisateur: 'Carnet d\'organisation',
-    coordonnateur: 'Régie opérationnelle',
-    compta: 'Salon financier'
+  const heroSignature = document.querySelector('.dash-hero-signature');
+  const roleHero = {
+    admin: {
+      kicker: 'Direction de maison',
+      title: `Centre de commandement, ${currentUser?.fname || 'Admin'}`,
+      desc: 'Pilotez l’activité de la maison: événements actifs, salons engagés, équipe, risques et revenus à sécuriser.',
+      signature: 'Une vue exécutive conçue pour décider vite sans perdre le niveau de détail opérationnel.'
+    },
+    organisateur: {
+      kicker: 'Carnet d’organisation',
+      title: `Atelier de réception, ${currentUser?.fname || 'Organisateur'}`,
+      desc: 'Préparez vos événements, invités, salles et services avec une lecture claire des prochaines actions.',
+      signature: 'Un espace orienté client pour transformer chaque dossier en réception prête à vivre.'
+    },
+    coordonnateur: {
+      kicker: 'Régie opérationnelle',
+      title: `Console terrain, ${currentUser?.fname || 'Coordonnateur'}`,
+      desc: 'Gardez la cadence entre salles, fournisseurs, services et confirmations pour éviter les frictions du jour J.',
+      signature: 'Une régie pensée pour prioriser les urgences et maintenir la qualité de service.'
+    },
+    compta: {
+      kicker: 'Salon financier',
+      title: `Bureau des encaissements, ${currentUser?.fname || 'Comptabilité'}`,
+      desc: 'Suivez les factures, paiements, relances et revenus confirmés dans une lecture financière plus nette.',
+      signature: 'Une vue sobre pour sécuriser les montants, les échéances et les suivis client.'
+    }
   };
-  const heroDescs = {
-    admin: 'Vue d\'ensemble de la maison: activité, accueil, disponibilité des salons et lecture financière en un seul regard.',
-    organisateur: 'Préparez chaque réception avec une présentation plus élégante, des échéances plus claires et une vision d\'ensemble plus sereine.',
-    coordonnateur: 'Gardez la cadence des équipes, des salles et des fournisseurs sans perdre la qualité de service ressentie côté client.',
-    compta: 'Suivez les factures, les paiements et les signaux de relance dans une lecture plus propre et plus premium.'
-  };
-  if (heroKicker) heroKicker.textContent = heroKickers[currentRole] || heroKickers.admin;
-  if (heroDesc) heroDesc.textContent = heroDescs[currentRole] || heroDescs.admin;
+  const hero = roleHero[currentRole] || roleHero.admin;
+  if (heroTitle) heroTitle.textContent = hero.title;
+  if (heroKicker) heroKicker.textContent = hero.kicker;
+  if (heroDesc) heroDesc.textContent = hero.desc;
+  if (heroSignature) heroSignature.textContent = hero.signature;
 
   if (summary) {
     const cards = [];
     if (currentRole === 'admin') {
-      cards.push({icon:'◇',label:'Événements actifs',value:summary.events.active,sub:`${summary.events.total} au total`});
-      cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`});
-      cards.push({icon:'⊞',label:'Équipe active',value:summary.users.active || DATA.users.filter(user => user.status === 'Actif').length || 0,sub:`${summary.users.total || DATA.users.length || 0} comptes internes`});
-      cards.push({icon:'♟',label:'Invités confirmés',value:summary.guests.confirmed,sub:`${summary.guests.total} au total`});
-      cards.push({icon:'◎',label:'Revenus encaissés',value:fmtMoney(summary.revenue.paid),sub:`${fmtMoney(summary.revenue.pending)} en attente`});
+      cards.push({icon:'◇',label:'Événements actifs',value:summary.events.active,sub:`${summary.events.total} au total`,hint:'Ouvrir les événements actifs',destination:{page:'events'}});
+      cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`,hint:'Ouvrir les réservations de salles',destination:{page:'rooms',tab:'rooms-reservations'}});
+      cards.push({icon:'⊞',label:'Équipe active',value:summary.users.active || DATA.users.filter(user => user.status === 'Actif').length || 0,sub:`${summary.users.total || DATA.users.length || 0} comptes internes`,hint:'Ouvrir les utilisateurs actifs',destination:{page:'users',search:'Actif'}});
+      cards.push({icon:'♟',label:'Invités confirmés',value:summary.guests.confirmed,sub:`${summary.guests.total} au total`,hint:'Ouvrir les invités confirmés',destination:{page:'guests',search:'Confirmé'}});
+      cards.push({icon:'◎',label:'Revenus encaissés',value:fmtMoney(summary.revenue.paid),sub:`${fmtMoney(summary.revenue.pending)} en attente`,hint:'Ouvrir les paiements',destination:{page:'billing',tab:'billing-payments'}});
     } else if (currentRole === 'organisateur') {
-      cards.push({icon:'◇',label:'Mes événements',value:summary.events.active,sub:`${summary.events.total} au total`});
-      cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`});
-      cards.push({icon:'♟',label:'Invités confirmés',value:summary.guests.confirmed,sub:`${summary.guests.total} invités au total`});
+      cards.push({icon:'◇',label:'Mes événements',value:summary.events.active,sub:`${summary.events.total} au total`,hint:'Ouvrir mes événements',destination:{page:'events'}});
+      cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`,hint:'Ouvrir mes réservations de salles',destination:{page:'rooms',tab:'rooms-reservations'}});
+      cards.push({icon:'♟',label:'Invités confirmés',value:summary.guests.confirmed,sub:`${summary.guests.total} invités au total`,hint:'Ouvrir les invités confirmés',destination:{page:'guests',search:'Confirmé'}});
     } else if (currentRole === 'coordonnateur') {
-      cards.push({icon:'◇',label:'Événements actifs',value:summary.events.active,sub:`${summary.events.total} au total`});
-      cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`});
-      cards.push({icon:'⊛',label:'Coordination',value:summary.events.active,sub:'événements à coordonner'});
+      cards.push({icon:'◇',label:'Événements actifs',value:summary.events.active,sub:`${summary.events.total} au total`,hint:'Ouvrir les événements actifs',destination:{page:'events'}});
+      cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`,hint:'Ouvrir les réservations de salles',destination:{page:'rooms',tab:'rooms-reservations'}});
+      cards.push({icon:'⊛',label:'Coordination',value:summary.events.active,sub:'événements à coordonner',hint:'Ouvrir les demandes de services',destination:{page:'services',tab:'svc-requests'}});
     } else if (currentRole === 'compta') {
-      cards.push({icon:'◎',label:'Revenus encaissés',value:fmtMoney(summary.revenue.paid),sub:'total payé'});
-      cards.push({icon:'⏳',label:'En attente',value:fmtMoney(summary.revenue.pending),sub:'factures en cours'});
-      cards.push({icon:'⚠',label:'Factures en retard',value:summary.invoices.overdue,sub:'à relancer'});
-      cards.push({icon:'◫',label:'Événements facturés',value:summary.events.total,sub:`${summary.events.active} actifs`});
+      cards.push({icon:'◎',label:'Revenus encaissés',value:fmtMoney(summary.revenue.paid),sub:'total payé',hint:'Ouvrir les paiements encaissés',destination:{page:'billing',tab:'billing-payments'}});
+      cards.push({icon:'⏳',label:'En attente',value:fmtMoney(summary.revenue.pending),sub:'factures en cours',hint:'Ouvrir les factures en attente',destination:{page:'billing',invoiceStatus:'En attente'}});
+      cards.push({icon:'⚠',label:'Factures en retard',value:summary.invoices.overdue,sub:'à relancer',hint:'Ouvrir les factures en retard',destination:{page:'billing',invoiceStatus:'En retard'}});
+      cards.push({icon:'◫',label:'Événements facturés',value:summary.events.total,sub:`${summary.events.active} actifs`,hint:'Ouvrir les événements facturés',destination:{page:'events'}});
     }
     statsEl.style.gridTemplateColumns = `repeat(${cards.length}, 1fr)`;
     statsEl.innerHTML = cards.map(c => `
-      <div class="stat-card">
+      <article class="stat-card stat-card-clickable" role="button" tabindex="0" aria-label="${escapeHtml(c.hint || c.label)}" data-destination='${escapeHtml(JSON.stringify(c.destination || { page: 'dashboard' }))}'>
         <div class="stat-icon-wrap">${c.icon}</div>
         <div class="stat-label">${c.label}</div>
         <div class="stat-value">${c.value}</div>
         <div class="stat-sub">${c.sub}</div>
-      </div>`).join('');
+      </article>`).join('');
+    statsEl.querySelectorAll('.stat-card-clickable').forEach((card) => {
+      const activate = () => {
+        try {
+          openDashboardDestination(JSON.parse(card.dataset.destination || '{}'));
+        } catch (error) {
+          console.error('Destination dashboard invalide:', error);
+        }
+      };
+      card.addEventListener('click', activate);
+      card.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate();
+        }
+      });
+    });
 
     const todayStr = new Date().toISOString().slice(0, 10);
     const todaysEvents = DATA.events.filter(e => e.date === todayStr && e.status !== 'Annulé').length;
@@ -2065,39 +2076,41 @@ async function renderEvents(filter = '', statusFilter = '') {
 
   document.getElementById('events-grid').innerHTML = events.map(e => `
     <div class="event-card" onclick="viewEvent(${e.id})">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
-        <div class="event-card-title">${e.name}</div>
-        ${statusBadge(e.status)}
-      </div>
-      <div class="event-card-meta">
-        <div class="event-meta-item">📅 ${formatDate(e.date)}</div>
-        <div class="event-meta-item">🕒 ${e.time || ''}</div>
-        <div class="event-meta-item">👥 ${e.guests || 0}</div>
-      </div>
-      <div class="event-meta-item" style="margin-bottom:12px">📍 ${e.room || ''}</div>
-      <div style="margin-bottom:8px">
-        ${(() => {
-          const used = e.budgetUsed || 0;
-          const budget = e.budget || 0;
-          if (budget <= 0) return `
-            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-              <span style="font-size:11px;color:var(--text-muted)">Budget non défini</span>
-              <span style="font-size:11px;color:var(--text-muted)">—</span>
-            </div>
-            <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>`;
-          const pct = Math.min(100, Math.round(used / budget * 100));
-          const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warning)' : 'var(--gold)';
-          return `
-            <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-              <span style="font-size:11px;color:var(--text-muted)">Budget: ${money(used)} / ${money(budget)} CAD</span>
-              <span style="font-size:11px;color:${color}">${pct}%</span>
-            </div>
-            <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${pct > 90 ? 'var(--danger)' : pct > 70 ? 'linear-gradient(90deg, var(--warning), var(--gold))' : ''}"></div></div>`;
-        })()}
+      <div class="event-card-main">
+        <div class="event-card-head">
+          <div class="event-card-title">${e.name}</div>
+          ${statusBadge(e.status)}
+        </div>
+        <div class="event-card-meta">
+          <div class="event-meta-item">📅 ${formatDate(e.date)}</div>
+          <div class="event-meta-item">🕒 ${e.time || ''}</div>
+          <div class="event-meta-item">👥 ${e.guests || 0}</div>
+        </div>
+        <div class="event-meta-item" style="margin-bottom:12px">📍 ${e.room || ''}</div>
+        <div style="margin-bottom:8px">
+          ${(() => {
+            const used = e.budgetUsed || 0;
+            const budget = e.budget || 0;
+            if (budget <= 0) return `
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:11px;color:var(--text-muted)">Budget non défini</span>
+                <span style="font-size:11px;color:var(--text-muted)">—</span>
+              </div>
+              <div class="progress-bar"><div class="progress-fill" style="width:0%"></div></div>`;
+            const pct = Math.min(100, Math.round(used / budget * 100));
+            const color = pct > 90 ? 'var(--danger)' : pct > 70 ? 'var(--warning)' : 'var(--gold)';
+            return `
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                <span style="font-size:11px;color:var(--text-muted)">Budget: ${money(used)} / ${money(budget)} CAD</span>
+                <span style="font-size:11px;color:${color}">${pct}%</span>
+              </div>
+              <div class="progress-bar"><div class="progress-fill" style="width:${pct}%;background:${pct > 90 ? 'var(--danger)' : pct > 70 ? 'linear-gradient(90deg, var(--warning), var(--gold))' : ''}"></div></div>`;
+          })()}
+        </div>
       </div>
       <div class="event-card-footer">
         <span class="badge badge-muted" style="font-size:9px">${e.type || ''}</span>
-        <div style="display:flex;gap:6px">
+        <div class="event-card-actions">
           <button class="btn btn-sm" onclick="event.stopPropagation();editEvent(${e.id})">Modifier</button>
           ${e.status !== 'Terminé' && e.status !== 'Annulé' ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();cancelEvent(${e.id})">Annuler</button>` : ''}
         </div>
@@ -3510,6 +3523,143 @@ function updateNotifBadge() {
   if (dot) dot.style.display = unread > 0 ? 'block' : 'none';
 }
 
+function updateTeamChatBadge(unread = null) {
+  const dot = document.getElementById('chat-unread-dot');
+  if (!dot) return;
+  const count = unread === null
+    ? directMessageUsers.reduce((total, user) => total + Number(user.unreadCount || 0), 0)
+    : Number(unread || 0);
+  dot.style.display = count > 0 ? 'block' : 'none';
+}
+
+function teamChatUserName(user) {
+  return `${user.fname || ''} ${user.lname || ''}`.trim() || user.email || 'Utilisateur';
+}
+
+function roleBadgeHtml(role) {
+  const normalized = normalizeStatusValue(role || '');
+  const label = ROLE_LABELS[role] || role || '';
+  return `<span class="role-badge role-badge-${escapeHtml(normalized)}">${escapeHtml(label)}</span>`;
+}
+
+function renderTeamChatUsers() {
+  const container = document.getElementById('team-chat-users');
+  if (!container) return;
+  container.innerHTML = directMessageUsers.map(user => `
+    <button class="team-chat-user ${Number(user.id) === Number(activeDirectMessageUserId) ? 'active' : ''}" onclick="selectTeamChatUser(${user.id})">
+      <span class="team-chat-avatar">${escapeHtml(getInitials(teamChatUserName(user)))}</span>
+      <span>
+        <span class="team-chat-name">${escapeHtml(teamChatUserName(user))}</span>
+        <span class="team-chat-role">${roleBadgeHtml(user.role)}</span>
+      </span>
+      ${Number(user.unreadCount || 0) > 0 ? `<span class="team-chat-count">${Number(user.unreadCount)}</span>` : ''}
+    </button>
+  `).join('') || '<div class="team-chat-empty" style="padding:18px">Aucun autre utilisateur actif.</div>';
+  updateTeamChatBadge();
+}
+
+async function refreshTeamChatUsers() {
+  try {
+    const data = await fetchDirectMessageUsers();
+    directMessageUsers = data.users || [];
+    renderTeamChatUsers();
+    updateTeamChatBadge(data.unread || 0);
+  } catch (err) {
+    console.warn('Team chat users:', err.message);
+  }
+}
+
+function teamMessageHtml(message) {
+  const mine = Number(message.senderId) === Number(currentUser?.id || CURRENT_USER?.id);
+  const name = mine ? 'Vous' : (message.senderName || 'Utilisateur');
+  const role = mine ? (currentRole || CURRENT_USER?.role) : message.senderRole;
+  return `
+    <div class="team-message ${mine ? 'mine' : ''}" data-message-id="${message.id}">
+      <div class="team-message-meta">
+        <strong>${escapeHtml(name)}</strong>
+        <span>${escapeHtml(ROLE_LABELS[role] || role || '')}</span>
+        <time>${formatDateTime(message.dateCreated)}</time>
+      </div>
+      <div class="team-message-body">${escapeHtml(message.message)}</div>
+    </div>`;
+}
+
+function renderTeamMessages(messages = []) {
+  const container = document.getElementById('team-chat-messages');
+  if (!container) return;
+  container.innerHTML = messages.length
+    ? messages.map(teamMessageHtml).join('')
+    : '<div class="team-chat-empty team-chat-empty-card"><div class="team-chat-empty-mark">✦</div><div class="team-chat-empty-title">Premier mot de service</div><div class="team-chat-empty-copy">Aucun message pour cette conversation. Envoyez une note courte et précise pour lancer la coordination.</div></div>';
+  container.scrollTop = container.scrollHeight;
+}
+
+function appendTeamMessage(message) {
+  const container = document.getElementById('team-chat-messages');
+  if (!container) return;
+  if (container.querySelector(`[data-message-id="${message.id}"]`)) return;
+  const empty = container.querySelector('.team-chat-empty');
+  if (empty) empty.remove();
+  container.insertAdjacentHTML('beforeend', teamMessageHtml(message));
+  container.scrollTop = container.scrollHeight;
+}
+
+async function selectTeamChatUser(userId) {
+  activeDirectMessageUserId = userId;
+  const user = directMessageUsers.find(item => Number(item.id) === Number(userId));
+  document.getElementById('team-chat-current-name').textContent = user ? teamChatUserName(user) : 'Conversation';
+  document.getElementById('team-chat-current-role').textContent = user ? (ROLE_LABELS[user.role] || user.role || '') : 'Messages directs internes';
+  renderTeamChatUsers();
+  try {
+    const data = await fetchDirectMessages(userId);
+    renderTeamMessages(data.messages || []);
+    await refreshTeamChatUsers();
+  } catch (err) {
+    showError('Conversation indisponible', err.message || 'Impossible de charger les messages.');
+  }
+}
+
+async function toggleTeamChat(forceOpen) {
+  const panel = document.getElementById('team-chat-panel');
+  const button = document.getElementById('team-chat-btn');
+  if (!panel) return;
+  const open = typeof forceOpen === 'boolean' ? forceOpen : !panel.classList.contains('open');
+  panel.classList.toggle('open', open);
+  if (button) button.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    await refreshTeamChatUsers();
+  }
+}
+
+async function submitTeamChatMessage() {
+  const input = document.getElementById('team-chat-input');
+  const text = input.value.trim();
+  if (!activeDirectMessageUserId) return showToast('Sélectionnez un destinataire.', 'warning');
+  if (!text) return;
+  const button = getClickedButton();
+  try {
+    setActionBusy(button, true, 'Envoi...');
+    const result = await sendDirectMessage(activeDirectMessageUserId, text);
+    input.value = '';
+    appendTeamMessage(result.message);
+    await refreshTeamChatUsers();
+  } catch (err) {
+    showError('Message non envoyé', err.message || 'Impossible d’envoyer le message.');
+  } finally {
+    setActionBusy(button, false);
+  }
+}
+
+function handleDirectMessageRealtime(message, inbound) {
+  const otherUserId = inbound ? message.senderId : message.recipientId;
+  if (Number(otherUserId) === Number(activeDirectMessageUserId) && document.getElementById('team-chat-panel')?.classList.contains('open')) {
+    appendTeamMessage(message);
+    if (inbound) fetchDirectMessages(otherUserId).then(() => refreshTeamChatUsers()).catch(() => {});
+  } else if (inbound) {
+    showRealtimeToast('Nouveau message', `${message.senderName || 'Un utilisateur'} vous a écrit.`, 'info');
+    refreshTeamChatUsers();
+  }
+}
+
 function toggleNotifications() {
   const panel = document.getElementById('notif-panel');
   const button = document.getElementById('notif-btn');
@@ -4153,6 +4303,11 @@ function removeTypingIndicator() {
   if (el) el.remove();
 }
 
+function buildLocalChatFallback(text) {
+  const preview = String(text || '').slice(0, 90);
+  return `Je peux continuer avec votre demande${preview ? `: "${preview}"` : ''}. Donnez les détails opérationnels: lister les salles, créer un événement, réserver une salle, ajouter un invité avec prénom, nom et événement, demander un service, générer une facture ou résumer les rapports.`;
+}
+
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
@@ -4183,7 +4338,9 @@ async function sendChat() {
     }
   } catch (err) {
     removeTypingIndicator();
-    appendChatBubble('Désolé, le service IA est temporairement indisponible. ' + (err.message || ''), 'ai');
+    const reply = buildLocalChatFallback(text);
+    appendChatBubble(reply, 'ai');
+    chatHistory.push({ role: 'assistant', content: reply });
   }
 
   document.getElementById('chat-send-btn').disabled = false;
@@ -4231,8 +4388,12 @@ Object.assign(window, {
   doLogout,
   toggleTheme,
   toggleNotifications,
+  toggleTeamChat,
+  selectTeamChatUser,
+  submitTeamChatMessage,
   topbarAction,
   navigateTo,
+  openDashboardDestination,
   calDayClick,
   calPrev,
   calNext,
