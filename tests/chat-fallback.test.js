@@ -245,6 +245,30 @@ test('chat fallback reports active team count from the database', async () => {
   assert.match(result.body.reply, /4 membre\(s\) actif\(s\)/i);
 });
 
+test('chat fallback lists active team member names from the database', async () => {
+  const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
+
+  const result = await api('/api/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      messages: [{ role: 'user', content: 'Donne moi les noms des utilisateurs actifs comme Marc Gagne' }]
+    })
+  });
+
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.automated, true);
+  assert.match(result.body.reply, /Membres de l.équipe/i);
+  assert.match(result.body.reply, /Marc Gagn/i);
+  assert.match(result.body.reply, /Emma C.t/i);
+  assert.match(result.body.reply, /Luc Bernard/i);
+  assert.doesNotMatch(result.body.reply, /membre\(s\) actif\(s\) sur/i);
+  assert.doesNotMatch(result.body.reply, /Mode automatique|indisponible|timeout|rate limit/i);
+});
+
 test('chat fallback creates events and reports the right total', async () => {
   const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
   const stamp = Date.now();

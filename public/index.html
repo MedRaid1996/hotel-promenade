@@ -2321,20 +2321,27 @@ table tbody tr:last-child td { border-bottom: none; }
   align-items: center;
   margin-bottom: 16px;
   padding: 12px;
-  border: 1px solid rgba(20,20,20,0.14);
-  background: linear-gradient(135deg, #fffdf7, #f6efe0);
+  border: 1px solid rgba(201,168,76,0.12);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top left, rgba(201,168,76,0.10), transparent 34%),
+    linear-gradient(135deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012)),
+    var(--surface);
+  box-shadow: 0 14px 30px rgba(0,0,0,0.12);
 }
 .room-filter-field {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   min-height: 44px;
-  border: 1px solid rgba(20,20,20,0.18);
-  background: #ffffff;
+  border: 1px solid rgba(201,168,76,0.14);
+  border-radius: 14px;
+  background: rgba(255,255,255,0.035);
   padding: 0 10px;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
 }
 .room-filter-icon {
-  color: #101010;
+  color: var(--gold);
   font-size: 14px;
 }
 .room-filter-field input,
@@ -2344,15 +2351,20 @@ table tbody tr:last-child td { border-bottom: none; }
   border: 0;
   outline: 0;
   background: transparent;
-  color: #101010;
+  color: var(--text);
   font: inherit;
 }
 .room-filter-field input::placeholder {
-  color: rgba(16,16,16,0.62);
+  color: var(--text-muted);
+}
+.room-filter-field:focus-within {
+  border-color: rgba(201,168,76,0.38);
+  background: rgba(201,168,76,0.07);
+  box-shadow: 0 0 0 3px rgba(201,168,76,0.08);
 }
 .room-filter-field select option {
-  color: #101010;
-  background: #ffffff;
+  color: var(--text);
+  background: var(--surface);
 }
 .room-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .room-card {
@@ -5265,17 +5277,6 @@ input[type="date"][id$="-filter"]::-webkit-calendar-picker-indicator {
         <!-- NOTIFICATIONS -->
         <div id="page-notifications" class="page">
           <div style="max-width:720px">
-            <div class="card" style="margin-bottom:16px">
-              <div class="card-title">Préférences de notification</div>
-              <div class="grid-2">
-                <label><input type="checkbox" id="pref-email"> Email</label>
-                <label><input type="checkbox" id="pref-sms"> SMS</label>
-                <label><input type="checkbox" id="pref-events"> Rappels événements</label>
-                <label><input type="checkbox" id="pref-payments"> Alertes paiement</label>
-                <label><input type="checkbox" id="pref-services"> Suivi services</label>
-              </div>
-              <button class="btn btn-primary btn-sm" onclick="saveNotificationPreferences()">Enregistrer les préférences</button>
-            </div>
             <div style="display:flex;gap:8px;margin-bottom:16px">
               <button class="btn btn-sm" onclick="markAllRead()">✓ Tout marquer comme lu</button>
             </div>

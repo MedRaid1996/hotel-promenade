@@ -450,7 +450,7 @@ function initializeDatabase() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       userId INTEGER UNIQUE,
       emailEnabled INTEGER DEFAULT 1,
-      smsEnabled INTEGER DEFAULT 0,
+      smsEnabled INTEGER DEFAULT 1,
       eventReminders INTEGER DEFAULT 1,
       paymentAlerts INTEGER DEFAULT 1,
       serviceUpdates INTEGER DEFAULT 1,
@@ -2521,11 +2521,13 @@ app.post('/api/direct-messages', verifyToken, async (req, res) => {
 // NOTIFICATION PREFERENCES
 app.get('/api/notification-preferences', verifyToken, async (req, res) => {
   try {
-    let prefs = await dbGet('SELECT * FROM notification_preferences WHERE userId = ?', [req.userId]);
-    if (!prefs) {
-      await dbRun('INSERT INTO notification_preferences (userId) VALUES (?)', [req.userId]);
-      prefs = await dbGet('SELECT * FROM notification_preferences WHERE userId = ?', [req.userId]);
-    }
+    await dbRun(
+      `INSERT INTO notification_preferences (userId, emailEnabled, smsEnabled, eventReminders, paymentAlerts, serviceUpdates)
+       VALUES (?,1,1,1,1,1)
+       ON CONFLICT(userId) DO UPDATE SET emailEnabled=1, smsEnabled=1, eventReminders=1, paymentAlerts=1, serviceUpdates=1`,
+      [req.userId]
+    );
+    const prefs = await dbGet('SELECT * FROM notification_preferences WHERE userId = ?', [req.userId]);
     res.json({ preferences: prefs });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
@@ -2534,14 +2536,13 @@ app.get('/api/notification-preferences', verifyToken, async (req, res) => {
 
 app.put('/api/notification-preferences', verifyToken, async (req, res) => {
   try {
-    const { emailEnabled, smsEnabled, eventReminders, paymentAlerts, serviceUpdates } = req.body;
     await dbRun(
       `INSERT INTO notification_preferences (userId, emailEnabled, smsEnabled, eventReminders, paymentAlerts, serviceUpdates)
-       VALUES (?,?,?,?,?,?) ON CONFLICT(userId) DO UPDATE SET emailEnabled=?, smsEnabled=?, eventReminders=?, paymentAlerts=?, serviceUpdates=?`,
-      [req.userId, emailEnabled ? 1 : 0, smsEnabled ? 1 : 0, eventReminders ? 1 : 0, paymentAlerts ? 1 : 0, serviceUpdates ? 1 : 0,
-      emailEnabled ? 1 : 0, smsEnabled ? 1 : 0, eventReminders ? 1 : 0, paymentAlerts ? 1 : 0, serviceUpdates ? 1 : 0]
+       VALUES (?,1,1,1,1,1)
+       ON CONFLICT(userId) DO UPDATE SET emailEnabled=1, smsEnabled=1, eventReminders=1, paymentAlerts=1, serviceUpdates=1`,
+      [req.userId]
     );
-    res.json({ message: 'Préférences mises à jour' });
+    res.json({ message: 'Toutes les notifications sont activées' });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
@@ -3148,13 +3149,13 @@ Capacités:
 - Demander des services (utilise request_service, list_services)
 - Générer des factures (utilise generate_invoice)
 - Consulter les rapports (utilise get_report_summary)
-- Consulter l'équipe active (utilise get_team_summary)
+- Consulter l'équipe active (utilise get_team_summary, list_users)
 - Consulter les notifications (utilise get_notifications)
 
 Salles (id ? nom):
 1=Salle Versailles (200 pers, 350$/h), 2=Salle Grand Salon (300 pers, 500$/h), 3=Salle Montréal (100 pers, 200$/h), 4=Salle Québec (40 pers, 120$/h), 5=Terrasse La Promenade (80 pers, 280$/h), 6=Salle Richelieu (60 pers, 160$/h).
 
-Types d'événements: Conférence, Mariage, Gala, Réunion, Formation, Cocktail, Autre.
+Types d'événements: Conférence, Mariage, Gala, Réunion, Formation, Cocktail, Séminaire, Banquet, Autre.
 Types de services: Traiteur Gastronomique (45$/pers), Audiovisuel Premium (800$), Sécurité & Accueil (240$), Décoration & Fleurs (600$), Photographie (400$), Animation & DJ (500$), Transport VIP (300$), Bar & Cocktails (500$), Signalisation (150$).
 Taux de taxe Québec: TPS+TVQ = 14.975%.
 
@@ -3174,7 +3175,7 @@ const CHAT_TOOLS = [
         type: 'object',
         properties: {
           name: { type: 'string', description: "Nom de l'événement" },
-          type: { type: 'string', description: "Type: Conférence, Mariage, Gala, Réunion, Formation, Cocktail, Autre" },
+          type: { type: 'string', description: "Type: Conférence, Mariage, Gala, Réunion, Formation, Cocktail, Séminaire, Banquet, Autre" },
           date: { type: 'string', description: 'Date YYYY-MM-DD' },
           time: { type: 'string', description: 'Heure début HH:MM' },
           endTime: { type: 'string', description: 'Heure fin HH:MM' },
@@ -3342,6 +3343,20 @@ const CHAT_TOOLS = [
       name: 'get_team_summary',
       description: "Obtenir le nombre d'utilisateurs, de membres actifs et la répartition par rôle.",
       parameters: { type: 'object', properties: {} }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_users',
+      description: "Lister les membres de l'équipe avec leurs noms, rôles et statuts.",
+      parameters: {
+        type: 'object',
+        properties: {
+          activeOnly: { type: 'boolean', description: 'true pour lister seulement les utilisateurs actifs' },
+          role: { type: 'string', description: 'Filtrer par rôle: admin, organisateur, coordonnateur, compta' }
+        }
+      }
     }
   },
   {
@@ -3650,6 +3665,27 @@ async function executeChatTool(toolName, args, userId, userRole) {
       };
     }
 
+    case 'list_users': {
+      if (userRole !== 'admin' && userRole !== 'coordonnateur') {
+        return { success: false, error: 'Accès refusé à la liste de l’équipe' };
+      }
+      const params = [];
+      const clauses = [];
+      if (args.activeOnly === true || args.activeOnly === 'true') {
+        clauses.push("status = 'Actif'");
+      }
+      if (args.role) {
+        clauses.push('role = ?');
+        params.push(String(args.role).toLowerCase());
+      }
+      const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+      const users = await dbAll(
+        `SELECT id, fname, lname, role, status, email FROM users ${where} ORDER BY role, lname, fname LIMIT 30`,
+        params
+      );
+      return { success: true, action: 'list_users', count: users.length, users };
+    }
+
     case 'get_notifications': {
       const notifications = await dbAll(
         'SELECT title, body, type, isRead, dateCreated FROM notifications WHERE userId = ? ORDER BY dateCreated DESC LIMIT 10',
@@ -3850,6 +3886,10 @@ function formatAutomationReply(toolName, result) {
         : 'Aucune notification récente.';
     case 'get_team_summary':
       return `L'équipe compte ${result.active} membre(s) actif(s) sur ${result.total} compte(s). Répartition active: ${result.byRole.map((row) => `${row.role}: ${row.count}`).join(' ; ') || 'aucun compte actif'}.`;
+    case 'list_users':
+      return result.users.length
+        ? `Membres de l'équipe: ${result.users.slice(0, 12).map((user) => `${user.fname} ${user.lname} (${user.role}, ${user.status})`).join(' ; ')}.`
+        : "Aucun utilisateur ne correspond à la demande.";
     case 'get_report_summary':
       return `${result.events.total} événements au total, ${result.events.active} actifs, ${result.guests.confirmed} invités confirmés, ${formatCad(result.revenue.paid)} encaissés et ${formatCad(result.revenue.pending)} en attente.`;
     case 'create_event':
@@ -3934,6 +3974,18 @@ async function runAutomationFallback(messages, userId, userRole) {
 
   if (/\bnotification/.test(text)) {
     toolName = 'get_notifications';
+  } else if (/\b(equipe|team|utilisateur|utilisateurs|membre|membres|staff|personnel)\b/.test(text) && /\b(nom|noms|liste|lister|affiche|afficher|montre|montrer|voir|qui|quels?|quelles?)\b/.test(text)) {
+    toolName = 'list_users';
+    if (/\b(actif|active|actifs|actives)\b/.test(text)) args.activeOnly = true;
+    const roleMatch = text.match(/\b(admin|administrateur|organisateur|coordonnateur|coordinateur|compta|comptabilite)\b/);
+    if (roleMatch) {
+      const roleMap = {
+        administrateur: 'admin',
+        coordinateur: 'coordonnateur',
+        comptabilite: 'compta'
+      };
+      args.role = roleMap[roleMatch[1]] || roleMatch[1];
+    }
   } else if (/\b(equipe|team|utilisateur|utilisateurs|membre|membres|staff|personnel)\b/.test(text) && /\b(actif|active|actifs|combien|nombre|total|statistique|stats?)\b/.test(text)) {
     toolName = 'get_team_summary';
   } else if ((/\b(cree|creer)\b/.test(text) || (/\bajoute\b/.test(text) && !/\binvites?\b/.test(text))) && /\bevenement\b/.test(text)) {

@@ -278,8 +278,6 @@ async function markAllNotificationsRead() { return apiRequest('/notifications/re
 async function fetchDirectMessageUsers() { return apiRequest('/direct-messages/users'); }
 async function fetchDirectMessages(userId) { return apiRequest(`/direct-messages/${userId}`); }
 async function sendDirectMessage(recipientId, message) { return apiRequest('/direct-messages', 'POST', { recipientId, message }); }
-async function fetchNotifPreferences() { return apiRequest('/notification-preferences'); }
-async function updateNotifPreferences(prefs) { return apiRequest('/notification-preferences', 'PUT', prefs); }
 async function fetchSettings() { return apiRequest('/settings'); }
 async function updateSettings(data) { return apiRequest('/settings', 'PUT', data); }
 
@@ -381,8 +379,6 @@ Object.assign(window, {
   fetchDirectMessageUsers,
   fetchDirectMessages,
   sendDirectMessage,
-  fetchNotifPreferences,
-  updateNotifPreferences,
   fetchSettings,
   updateSettings,
   fetchUsers,

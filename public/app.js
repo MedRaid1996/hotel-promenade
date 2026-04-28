@@ -2114,7 +2114,6 @@ async function renderEvents(filter = '', statusFilter = '') {
         </div>
       </div>
       <div class="event-card-footer">
-        <span class="badge badge-muted" style="font-size:9px">${e.type || ''}</span>
         <div class="event-card-actions">
           <button class="btn btn-sm" onclick="event.stopPropagation();editEvent(${e.id})">Modifier</button>
           ${e.status !== 'Terminé' && e.status !== 'Annulé' ? `<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();cancelEvent(${e.id})">Annuler</button>` : ''}
@@ -3472,14 +3471,8 @@ function renderNotifPanel() {
 
 async function renderAllNotifications() {
   try {
-    const [data, prefsData] = await Promise.all([fetchNotifications(), fetchNotifPreferences()]);
+    const data = await fetchNotifications();
     DATA.notifications = data.notifications || [];
-    const prefs = prefsData.preferences || {};
-    document.getElementById('pref-email').checked = Number(prefs.emailEnabled ?? 1) === 1;
-    document.getElementById('pref-sms').checked = Number(prefs.smsEnabled || 0) === 1;
-    document.getElementById('pref-events').checked = Number(prefs.eventReminders ?? 1) === 1;
-    document.getElementById('pref-payments').checked = Number(prefs.paymentAlerts ?? 1) === 1;
-    document.getElementById('pref-services').checked = Number(prefs.serviceUpdates ?? 1) === 1;
   } catch (e) {}
 
   document.getElementById('all-notif-list').innerHTML = DATA.notifications.map(n => `
@@ -3490,21 +3483,6 @@ async function renderAllNotifications() {
     </div>
   `).join('') || '<div style="color:var(--text-muted);font-size:13px;padding:16px">Aucune notification</div>';
   enhanceInteractiveAccessibility(document.getElementById('page-notifications'));
-}
-
-async function saveNotificationPreferences() {
-  try {
-    await updateNotifPreferences({
-      emailEnabled: document.getElementById('pref-email').checked,
-      smsEnabled: document.getElementById('pref-sms').checked,
-      eventReminders: document.getElementById('pref-events').checked,
-      paymentAlerts: document.getElementById('pref-payments').checked,
-      serviceUpdates: document.getElementById('pref-services').checked
-    });
-    showToast('Préférences de notification enregistrées.', 'success');
-  } catch (err) {
-    showToast(err.message || 'Erreur préférences', 'error');
-  }
 }
 
 function getNotifIcon(type) {
@@ -4532,7 +4510,6 @@ Object.assign(window, {
   saveSettings,
   showToast,
   renderAllNotifications,
-  saveNotificationPreferences,
   markRead,
   markAllRead,
   getReportFilters,
