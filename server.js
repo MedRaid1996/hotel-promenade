@@ -2616,7 +2616,7 @@ app.post('/api/users', verifyToken, requireRole('admin'), async (req, res) => {
 
 app.put('/api/users/:id', verifyToken, requireRole('admin'), async (req, res) => {
   try {
-    const { fname, lname, email, role, status, phone } = req.body;
+    const { fname, lname, email, role, status, phone, password } = req.body;
     const existing = await dbGet('SELECT * FROM users WHERE id = ?', [req.params.id]);
     if (!existing) return res.status(404).json({ error: 'Utilisateur non trouvé' });
     const cleanFname = normalizeText(fname || existing.fname);
@@ -2628,10 +2628,20 @@ app.put('/api/users/:id', verifyToken, requireRole('admin'), async (req, res) =>
     if (!isValidEmail(cleanEmail)) return res.status(400).json({ error: 'Courriel invalide' });
     if (!cleanRole) return res.status(400).json({ error: 'Rôle invalide' });
     if (!cleanUserStatus) return res.status(400).json({ error: 'Statut utilisateur invalide' });
-    await dbRun(
-      'UPDATE users SET fname=?, lname=?, email=?, role=?, status=?, phone=? WHERE id=?',
-      [cleanFname, cleanLname, cleanEmail, cleanRole, cleanUserStatus, normalizeText(phone), req.params.id]
-    );
+    const cleanPhone = normalizeText(phone);
+    if (password) {
+      if (String(password).length < 10) return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 10 caractères' });
+      const hp = bcrypt.hashSync(password, 10);
+      await dbRun(
+        'UPDATE users SET fname=?, lname=?, email=?, role=?, status=?, phone=?, password=? WHERE id=?',
+        [cleanFname, cleanLname, cleanEmail, cleanRole, cleanUserStatus, cleanPhone, hp, req.params.id]
+      );
+    } else {
+      await dbRun(
+        'UPDATE users SET fname=?, lname=?, email=?, role=?, status=?, phone=? WHERE id=?',
+        [cleanFname, cleanLname, cleanEmail, cleanRole, cleanUserStatus, cleanPhone, req.params.id]
+      );
+    }
     await logAudit(req.userId, 'UPDATE', 'users', req.params.id, `Utilisateur modifié`);
     res.json({ message: 'Utilisateur modifié' });
   } catch (e) {

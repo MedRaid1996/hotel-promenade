@@ -5145,11 +5145,18 @@ button {
         </div>
         <div class="form-group"><label>Téléphone</label><input type="tel" id="u-phone"></div>
       </div>
-      <div class="form-group"><label>Mot de passe provisoire *</label><input type="password" id="u-pass" minlength="10" placeholder="••••••••"></div>
+      <div class="form-row">
+        <div class="form-group"><label>Statut *</label>
+          <select id="u-status">
+            <option>Actif</option><option>Inactif</option>
+          </select>
+        </div>
+        <div class="form-group"><label id="u-pass-label">Mot de passe provisoire *</label><input type="password" id="u-pass" minlength="10" placeholder="Mot de passe provisoire"></div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-sm" onclick="closeModal('user-modal')">Annuler</button>
-      <button class="btn btn-primary btn-sm" onclick="saveUser()">Créer l'utilisateur</button>
+      <button class="btn btn-primary btn-sm" id="user-modal-submit" onclick="saveUser()">Créer l'utilisateur</button>
     </div>
   </div>
 </div>

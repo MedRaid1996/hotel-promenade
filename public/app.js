@@ -5,6 +5,7 @@ let currentRole = 'admin';
 let calDate = new Date();
 let calDate2 = new Date();
 let editingEventId = null;
+let editingUserId = null;
 let activeModalId = null;
 let modalFocusCleanup = null;
 let lastFocusedBeforeModal = null;
@@ -3407,7 +3408,7 @@ function renderUsersTable() {
       <td style="color:var(--text-muted)">${u.lastAccess || '–'}</td>
       <td><span class="badge ${u.status === 'Actif' ? 'badge-success' : 'badge-danger'}">${u.status}</span></td>
       <td>
-        <button class="btn btn-sm" onclick="showToast('Utilisateur modifié','info')">Modifier</button>
+        <button class="btn btn-sm" onclick="editUser(${u.id})">Modifier</button>
         ${u.email !== 'admin@lapromenade.com' ? `<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id})">Désactiver</button>` : ''}
       </td>
     </tr>
@@ -3854,7 +3855,56 @@ async function saveGuest() {
   }
 }
 
-function openUserModal() { openModal('user-modal'); }
+const USER_ROLE_LABELS = {
+  admin: 'Administrateur',
+  organisateur: 'Organisateur',
+  coordonnateur: 'Coordonnateur',
+  compta: 'Comptabilité'
+};
+
+const USER_ROLE_VALUES = Object.fromEntries(Object.entries(USER_ROLE_LABELS).map(([value, label]) => [label, value]));
+
+function resetUserModal() {
+  editingUserId = null;
+  document.getElementById('user-modal-title').textContent = 'Nouvel utilisateur';
+  document.getElementById('u-fname').value = '';
+  document.getElementById('u-lname').value = '';
+  document.getElementById('u-email').value = '';
+  document.getElementById('u-role').value = 'Organisateur';
+  document.getElementById('u-phone').value = '';
+  document.getElementById('u-status').value = 'Actif';
+  document.getElementById('u-pass').value = '';
+  document.getElementById('u-pass').placeholder = 'Mot de passe provisoire';
+  document.getElementById('u-pass-label').textContent = 'Mot de passe provisoire *';
+  document.getElementById('user-modal-submit').textContent = 'Créer l\'utilisateur';
+}
+
+function openUserModal() {
+  resetUserModal();
+  openModal('user-modal');
+}
+
+function editUser(id) {
+  const user = DATA.users.find(u => Number(u.id) === Number(id));
+  if (!user) {
+    showToast('Utilisateur introuvable.', 'error');
+    return;
+  }
+
+  editingUserId = user.id;
+  document.getElementById('user-modal-title').textContent = 'Modifier l\'utilisateur';
+  document.getElementById('u-fname').value = user.fname || '';
+  document.getElementById('u-lname').value = user.lname || '';
+  document.getElementById('u-email').value = user.email || '';
+  document.getElementById('u-role').value = USER_ROLE_LABELS[user.role] || 'Organisateur';
+  document.getElementById('u-phone').value = user.phone || '';
+  document.getElementById('u-status').value = user.status || 'Actif';
+  document.getElementById('u-pass').value = '';
+  document.getElementById('u-pass').placeholder = 'Laisser vide pour conserver le mot de passe';
+  document.getElementById('u-pass-label').textContent = 'Nouveau mot de passe';
+  document.getElementById('user-modal-submit').textContent = 'Enregistrer les modifications';
+  openModal('user-modal');
+}
 
 async function saveUser() {
   const button = getClickedButton();
@@ -3862,24 +3912,33 @@ async function saveUser() {
   const lname = document.getElementById('u-lname').value.trim();
   const email = document.getElementById('u-email').value.trim().toLowerCase();
   const password = document.getElementById('u-pass').value;
+  const role = USER_ROLE_VALUES[document.getElementById('u-role').value] || 'organisateur';
+  const phone = document.getElementById('u-phone') ? document.getElementById('u-phone').value : '';
+  const status = document.getElementById('u-status') ? document.getElementById('u-status').value : 'Actif';
   if (!fname || !lname) { showToast('Prénom et nom requis.', 'error'); return; }
   if (!email || !isValidEmailAddress(email)) { showToast('Courriel valide requis.', 'error'); return; }
-  if (!password) { showToast('Mot de passe requis.', 'error'); return; }
-  if (password.length < 10) { showToast('Le mot de passe doit contenir au moins 10 caractères.', 'error'); return; }
-
-  const roleMap = { 'Administrateur': 'admin', 'Organisateur': 'organisateur', 'Coordonnateur': 'coordonnateur', 'Comptabilité': 'compta' };
+  if (!editingUserId && !password) { showToast('Mot de passe requis.', 'error'); return; }
+  if (password && password.length < 10) { showToast('Le mot de passe doit contenir au moins 10 caractères.', 'error'); return; }
 
   try {
-    setActionBusy(button, true, 'Création...');
-    await createUser({
+    const payload = {
       fname, lname,
       email,
-      password,
-      role: roleMap[document.getElementById('u-role').value] || 'organisateur',
-      phone: document.getElementById('u-phone') ? document.getElementById('u-phone').value : '',
-    });
+      role,
+      phone,
+      status
+    };
+    if (password) payload.password = password;
+
+    setActionBusy(button, true, editingUserId ? 'Enregistrement...' : 'Création...');
+    if (editingUserId) {
+      await updateUser(editingUserId, payload);
+    } else {
+      await createUser(payload);
+    }
     closeModal('user-modal');
-    showToast(`Utilisateur ${fname} ${lname} créé.`, 'success');
+    showToast(editingUserId ? `Utilisateur ${fname} ${lname} modifié.` : `Utilisateur ${fname} ${lname} créé.`, 'success');
+    editingUserId = null;
     renderUsers();
   } catch (err) {
     showToast(err.message || 'Erreur', 'error');
@@ -4434,6 +4493,7 @@ Object.assign(window, {
   doPayInvoice,
   simulatePay,
   openUserModal,
+  editUser,
   saveUser,
   deleteUser,
   saveSettings,
