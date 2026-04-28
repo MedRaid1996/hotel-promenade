@@ -1142,8 +1142,10 @@ async function initApp() {
   // Fill services checkboxes in event modal
   const svcCheck = document.getElementById('ev-services-check');
   svcCheck.innerHTML = DATA.servicesCatalog.slice(0, 6).map(s =>
-    `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);cursor:pointer">
-      <input type="checkbox" style="accent-color:var(--gold)"> ${s.icon} ${s.name}
+    `<label class="service-check-item">
+      <input type="checkbox">
+      <span class="service-check-icon">${s.icon}</span>
+      <span class="service-check-name">${escapeHtml(s.name)}</span>
     </label>`).join('');
 
   renderNotifPanel();

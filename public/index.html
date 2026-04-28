@@ -850,6 +850,50 @@ body {
   border-color: var(--gold);
 }
 .form-group select option { background: var(--surface2); }
+
+.services-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.service-check-item {
+  display: grid;
+  grid-template-columns: 24px 24px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 12px;
+  min-height: 48px;
+  padding: 10px 12px;
+  border: 1px solid var(--control-border);
+  border-radius: 12px;
+  background: var(--control-bg);
+}
+
+.service-check-item input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--gold);
+}
+
+.service-check-icon {
+  text-align: center;
+  line-height: 1;
+}
+
+.service-check-name {
+  color: var(--text-mid);
+  font-size: 12px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.service-check-item:focus-within {
+  border-color: var(--control-border-focus);
+  box-shadow: 0 0 0 3px var(--gold-glow);
+}
 .btn {
   display: inline-flex;
   align-items: center;
@@ -5278,7 +5322,7 @@ input[type="date"][id$="-filter"]::-webkit-calendar-picker-indicator {
         <select id="ev-room"><option value="">— Sélectionner une salle —</option></select>
       </div>
       <div class="form-group"><label>Services requis</label>
-        <div id="ev-services-check" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:4px"></div>
+        <div id="ev-services-check" class="services-check-grid"></div>
       </div>
       <div class="form-group"><label>Nombre d'invités estimé</label><input type="number" id="ev-guests" placeholder="50" min="0" step="1"></div>
       <div class="form-row">
