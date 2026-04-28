@@ -11,6 +11,7 @@ let modalFocusCleanup = null;
 let lastFocusedBeforeModal = null;
 let directMessageUsers = [];
 let activeDirectMessageUserId = null;
+let selectedEventOrganizer = { name: '', email: '' };
 
 // Chart instances (for cleanup)
 let chartInstances = {};
@@ -2139,8 +2140,10 @@ async function populateEventOwnerSelect(selectedOwnerId = '') {
   if (currentRole !== 'admin') {
     group.style.display = 'none';
     select.value = '';
-    document.getElementById('ev-organizer').value = `${currentUser?.fname || ''} ${currentUser?.lname || ''}`.trim();
-    document.getElementById('ev-contact').value = currentUser?.email || '';
+    selectedEventOrganizer = {
+      name: `${currentUser?.fname || ''} ${currentUser?.lname || ''}`.trim(),
+      email: currentUser?.email || ''
+    };
     return;
   }
   group.style.display = '';
@@ -2164,16 +2167,13 @@ async function populateEventOwnerSelect(selectedOwnerId = '') {
 
 function syncSelectedOrganizer() {
   const select = document.getElementById('ev-owner');
-  const organizerInput = document.getElementById('ev-organizer');
-  const contactInput = document.getElementById('ev-contact');
   const helper = document.getElementById('ev-owner-helper');
-  if (!select || !organizerInput || !contactInput) return;
+  if (!select) return;
 
   const option = select.selectedOptions?.[0];
   const name = option?.dataset?.name || '';
   const email = option?.dataset?.email || '';
-  organizerInput.value = name;
-  contactInput.value = email;
+  selectedEventOrganizer = { name, email };
   if (helper) helper.textContent = email ? `Contact: ${email}` : 'Choisissez un organisateur actif du système.';
 }
 
@@ -2190,8 +2190,7 @@ async function editEvent(id) {
   document.getElementById('ev-end-time').value = e.endTime || '';
   document.getElementById('ev-budget').value = e.budget || '';
   document.getElementById('ev-guests').value = e.guests || '';
-  document.getElementById('ev-organizer').value = e.organizer || '';
-  document.getElementById('ev-contact').value = e.contact || '';
+  selectedEventOrganizer = { name: e.organizer || '', email: e.contact || '' };
   document.getElementById('ev-desc').value = e.description || e.desc || '';
   if (e.room) document.getElementById('ev-room').value = e.room;
   await populateEventOwnerSelect(e.userId || '');
@@ -3731,8 +3730,7 @@ async function openEventModal() {
   document.getElementById('ev-end-time').value = '11:00';
   document.getElementById('ev-budget').value = '';
   document.getElementById('ev-guests').value = '';
-  document.getElementById('ev-organizer').value = '';
-  document.getElementById('ev-contact').value = '';
+  selectedEventOrganizer = { name: '', email: '' };
   document.getElementById('ev-desc').value = '';
   await populateEventOwnerSelect('');
   openModal('event-modal');
@@ -3745,7 +3743,8 @@ function buildEventPayload(status) {
   const endTime = document.getElementById('ev-end-time').value || '';
   const budgetRaw = document.getElementById('ev-budget').value;
   const guestsRaw = document.getElementById('ev-guests').value;
-  const contact = document.getElementById('ev-contact').value.trim();
+  const organizer = selectedEventOrganizer.name || '';
+  const contact = selectedEventOrganizer.email || '';
   const ownerUserId = document.getElementById('ev-owner')?.value || '';
   const budget = budgetRaw === '' ? 0 : Number(budgetRaw);
   const guests = guestsRaw === '' ? 0 : Number(guestsRaw);
@@ -3774,7 +3773,7 @@ function buildEventPayload(status) {
     budget,
     guests,
     room: document.getElementById('ev-room').value,
-    organizer: document.getElementById('ev-organizer').value,
+    organizer,
     contact,
     description: document.getElementById('ev-desc').value,
     status,
