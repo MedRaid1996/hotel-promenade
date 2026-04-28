@@ -1807,13 +1807,12 @@ function renderCalendar(targetId = 'cal-grid', dateRef = null) {
     </div>`;
   }
 
-  document.getElementById(targetId).innerHTML = html;
+  const target = document.getElementById(targetId);
+  if (target) target.innerHTML = html;
 }
 
 function calPrev() { calDate.setMonth(calDate.getMonth() - 1); renderCalendar(); }
 function calNext() { calDate.setMonth(calDate.getMonth() + 1); renderCalendar(); }
-function calPrev2() { calDate2.setMonth(calDate2.getMonth() - 1); renderCalendar('cal2-grid', calDate2); }
-function calNext2() { calDate2.setMonth(calDate2.getMonth() + 1); renderCalendar('cal2-grid', calDate2); }
 
 function calDayClick(dateStr) {
   const events = DATA.events.filter(e => e.date === dateStr);
@@ -1838,64 +1837,13 @@ function getEventStatusClass(status) {
 function initRoomsFullCalendar() {
   const calendarEl = document.getElementById('rooms-fullcalendar');
   if (!calendarEl || typeof FullCalendar === 'undefined') return;
-  
-  // Destroy existing calendar
+
   if (roomsCalendar) {
-    roomsCalendar.destroy();
-    roomsCalendar = null;
+    refreshFullCalendar();
+    window.requestAnimationFrame(() => roomsCalendar.updateSize());
+    return;
   }
-  
-  // Transform events data for FullCalendar
-  const fcEvents = DATA.events
-    .filter(e => e.date && e.status !== 'Annulé')
-    .map(e => {
-      const start = e.date + (e.time ? 'T' + e.time : '');
-      let end = e.date;
-      if (e.endTime) {
-        end = e.date + 'T' + e.endTime;
-      } else if (e.time && e.duration) {
-        // Calculate end time from duration
-        const durationHours = parseInt(e.duration) || 2;
-        const [h, m] = e.time.split(':').map(Number);
-        const endH = h + durationHours;
-        end = e.date + 'T' + String(endH).padStart(2, '0') + ':' + String(m).padStart(2, '0');
-      }
-      
-      return {
-        id: e.id,
-        title: e.name,
-        start: start,
-        end: end,
-        extendedProps: {
-          room: e.room,
-          guests: e.guests,
-          status: e.status,
-          type: e.type,
-          organizer: e.organizer
-        },
-        classNames: [getEventStatusClass(e.status)],
-        editable: e.status !== 'Terminé' && e.status !== 'Annulé'
-      };
-    });
-  
-  // Add reservations as events too
-  const reservationEvents = DATA.reservations
-    .filter(r => r.date && r.status !== 'Annulé')
-    .map(r => ({
-      id: 'res-' + r.id,
-      title: `📍 ${r.roomName || 'Salle'} - ${r.eventName || 'Réservation'}`,
-      start: r.date + (r.startTime ? 'T' + r.startTime : ''),
-      end: r.date + (r.endTime ? 'T' + r.endTime : ''),
-      backgroundColor: r.status === 'Confirmé' ? 'var(--success)' : 'var(--warning)',
-      borderColor: r.status === 'Confirmé' ? 'var(--success)' : 'var(--warning)',
-      extendedProps: {
-        isReservation: true,
-        roomId: r.roomId,
-        status: r.status
-      },
-      editable: false
-    }));
-  
+
   roomsCalendar = new FullCalendar.Calendar(calendarEl, {
     initialView: 'dayGridMonth',
     locale: 'fr',
@@ -1912,7 +1860,7 @@ function initRoomsFullCalendar() {
       day: 'Jour',
       list: 'Liste'
     },
-    events: [...fcEvents, ...reservationEvents],
+    events: buildRoomsCalendarEvents(),
     editable: true,
     selectable: true,
     selectMirror: true,
@@ -2063,8 +2011,10 @@ function initRoomsFullCalendar() {
 // Refresh FullCalendar after data changes
 function refreshFullCalendar() {
   if (roomsCalendar) {
+    roomsCalendar.batchRendering(() => {
     roomsCalendar.removeAllEvents();
     roomsCalendar.addEventSource(buildRoomsCalendarEvents());
+    });
   }
 }
 
@@ -2300,11 +2250,12 @@ async function renderRooms() {
     </tr>
   `).join('') || '<tr><td colspan="6" style="color:var(--text-muted);text-align:center">Aucune réservation</td></tr>';
 
-  // Initialize FullCalendar for rooms
-  // Small delay to ensure DOM is ready
-  setTimeout(() => {
-    initRoomsFullCalendar();
-  }, 100);
+  const calendarTab = document.getElementById('rooms-calendar');
+  if (calendarTab && calendarTab.style.display !== 'none') {
+    window.requestAnimationFrame(() => initRoomsFullCalendar());
+  } else {
+    refreshFullCalendar();
+  }
 }
 
 async function doReserveRoom(roomId) {
@@ -3965,7 +3916,9 @@ function switchTab(el, targetId) {
   el.dataset.target = targetId;
   syncTabAccessibility(parent);
 
-  if (targetId === 'rooms-calendar') renderCalendar('cal2-grid', calDate2);
+  if (targetId === 'rooms-calendar') {
+    window.requestAnimationFrame(() => initRoomsFullCalendar());
+  }
 }
 
 function renderAuditLog() {

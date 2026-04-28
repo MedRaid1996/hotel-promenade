@@ -660,6 +660,15 @@ function normalizeText(value) {
   return String(value || '').trim();
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function normalizeStatusAlias(status) {
   const normalized = normalizeText(status)
     .normalize('NFD')
@@ -1716,7 +1725,25 @@ app.get('/api/guests/export', verifyToken, async (req, res) => {
   }
 });
 
-// SEND INVITATION (mock email — logs to console)
+async function sendGuestInvitationByEmail(guest, { subject, text }) {
+  const transporter = getMailTransporter();
+  return await transporter.sendMail({
+    from: `"${HOTEL_BILLING_FROM_NAME}" <${GMAIL_USER}>`,
+    to: guest.email,
+    subject,
+    text,
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.6;color:#1f2933">
+        <h2 style="margin:0 0 12px;color:#8a6d1f">${escapeHtml(HOTEL_BILLING_FROM_NAME)}</h2>
+        <p>${escapeHtml(text).replace(/\n/g, '<br>')}</p>
+        <hr style="border:0;border-top:1px solid #eee;margin:20px 0">
+        <p style="font-size:12px;color:#667085">Invitation envoyée par la plateforme Hôtel La Promenade.</p>
+      </div>
+    `
+  });
+}
+
+// SEND INVITATION
 app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
   try {
     const guest = await dbGet('SELECT g.*, e.name as eventName, e.date, e.time, e.userId as eventOwnerId FROM guests g LEFT JOIN events e ON g.eventId = e.id WHERE g.id = ?', [req.params.id]);
@@ -1733,25 +1760,27 @@ app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
     const customMessage = normalizeText(req.body.message || req.body.customMessage);
     const subject = normalizeText(req.body.subject) || `Invitation - ${guest.eventName || 'Hôtel La Promenade'}`;
     const invitationText = customMessage || `Bonjour ${guest.fname}, vous êtes invité à "${guest.eventName}" le ${guest.date} à ${guest.time}.`;
+    if (!GMAIL_USER || !GMAIL_APP_PASS) {
+      return res.status(503).json({
+        error: 'Envoi courriel non configuré. Ajoutez GMAIL_USER et GMAIL_APP_PASS dans les variables Railway/.env, puis redéployez.'
+      });
+    }
+    let mailInfo;
     try {
-      if (GMAIL_USER && GMAIL_APP_PASS) {
-        const transporter = getMailTransporter();
-        await transporter.sendMail({
-          from: `"${HOTEL_BILLING_FROM_NAME}" <${GMAIL_USER}>`,
-          to: guest.email,
-          subject,
-          text: invitationText
-        });
-      } else {
-        console.log(`[MOCK EMAIL] To: ${guest.email} - ${subject} - ${invitationText}`);
-      }
+      mailInfo = await sendGuestInvitationByEmail(guest, { subject, text: invitationText });
     } catch (mailError) {
-      console.warn('Invitation email failed, keeping mock success:', mailError.message);
+      console.warn('Invitation email failed:', mailError.message);
+      return res.status(502).json({
+        error: `Le courriel n'a pas été envoyé: ${mailError.message}`
+      });
     }
 
     await dbRun('UPDATE guests SET status = ? WHERE id = ?', ['Invité', req.params.id]);
     await logAudit(req.userId, 'INVITE', 'guests', req.params.id, `Invitation envoyée à ${guest.email}${customMessage ? ' avec message personnalisé' : ''}`);
-    res.json({ message: `Invitation envoyée à ${guest.fname} ${guest.lname} (${guest.email})` });
+    res.json({
+      message: `Invitation envoyée à ${guest.fname} ${guest.lname} (${guest.email})`,
+      messageId: mailInfo.messageId || null
+    });
   } catch (e) {
     res.status(500).json({ error: 'Erreur serveur' });
   }
