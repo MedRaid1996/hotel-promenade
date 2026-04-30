@@ -1344,12 +1344,12 @@ async function renderDashboard() {
       cards.push({icon:'◇',label:'Événements actifs',value:summary.events.active,sub:`${summary.events.total} au total`,hint:'Ouvrir les événements actifs',destination:{page:'events'}});
       cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`,hint:'Ouvrir les réservations de salles',destination:{page:'rooms',tab:'rooms-reservations'}});
       cards.push({icon:'⊞',label:'Équipe active',value:summary.users.active || DATA.users.filter(user => user.status === 'Actif').length || 0,sub:`${summary.users.total || DATA.users.length || 0} comptes internes`,hint:'Ouvrir les utilisateurs actifs',destination:{page:'users',search:'Actif'}});
-      cards.push({icon:'♟',label:'Invités confirmés',value:summary.guests.confirmed,sub:`${summary.guests.total} au total`,hint:'Ouvrir les invités confirmés',destination:{page:'guests',search:'Confirmé'}});
+      cards.push({icon:'♟',label:'Invités',value:summary.guests.total,sub:`${summary.guests.confirmed} confirmés`,hint:'Ouvrir les invités',destination:{page:'guests'}});
       cards.push({icon:'◎',label:'Revenus encaissés',value:fmtMoney(summary.revenue.paid),sub:`${fmtMoney(summary.revenue.pending)} en attente`,hint:'Ouvrir les paiements',destination:{page:'billing',tab:'billing-payments'}});
     } else if (currentRole === 'organisateur') {
       cards.push({icon:'◇',label:'Mes événements',value:summary.events.active,sub:`${summary.events.total} au total`,hint:'Ouvrir mes événements',destination:{page:'events'}});
       cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`,hint:'Ouvrir mes réservations de salles',destination:{page:'rooms',tab:'rooms-reservations'}});
-      cards.push({icon:'♟',label:'Invités confirmés',value:summary.guests.confirmed,sub:`${summary.guests.total} invités au total`,hint:'Ouvrir les invités confirmés',destination:{page:'guests',search:'Confirmé'}});
+      cards.push({icon:'♟',label:'Invités',value:summary.guests.total,sub:`${summary.guests.confirmed} confirmés`,hint:'Ouvrir les invités',destination:{page:'guests'}});
     } else if (currentRole === 'coordonnateur') {
       cards.push({icon:'◇',label:'Événements actifs',value:summary.events.active,sub:`${summary.events.total} au total`,hint:'Ouvrir les événements actifs',destination:{page:'events'}});
       cards.push({icon:'▣',label:'Salles réservées',value:summary.rooms.reserved,sub:`sur ${summary.rooms.total} disponibles`,hint:'Ouvrir les réservations de salles',destination:{page:'rooms',tab:'rooms-reservations'}});
@@ -1390,7 +1390,7 @@ async function renderDashboard() {
     const heroMetrics = {
       events: todaysEvents || summary.events.active || 0,
       rooms: `${summary.rooms.reserved}/${summary.rooms.total}`,
-      guests: summary.guests.confirmed || 0,
+      guests: summary.guests.total || 0,
       revenue: currentRole === 'admin' || currentRole === 'compta'
         ? fmtMoney(summary.revenue.paid)
         : `${summary.events.active || 0} actifs`
@@ -1514,7 +1514,7 @@ function getRoleSpotlightConfig(summary) {
       intro: 'Gardez une lecture claire de vos événements, des invités attendus et des postes à verrouiller avant le jour J.',
       metrics: [
         { label: 'Prochain événement', value: nextEvent ? formatDate(nextEvent.date) : 'À venir', note: nextEvent?.name || 'Aucun programme' },
-        { label: 'Invités confirmés', value: summary.guests.confirmed || 0, note: 'accueil validé' },
+        { label: 'Invités', value: summary.guests.total || 0, note: `${summary.guests.confirmed || 0} confirmés` },
         { label: 'Services demandés', value: DATA.services.length, note: 'prestations suivies' }
       ],
       pulse: [
