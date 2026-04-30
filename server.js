@@ -35,6 +35,8 @@ const GMAIL_APP_PASS = (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '');
 const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
 const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const MAIL_FROM_EMAIL = process.env.MAIL_FROM_EMAIL || GMAIL_USER;
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
 const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 30000));
 const DEFAULT_SERVICE_CATALOG = [
@@ -53,6 +55,7 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' }
@@ -939,7 +942,65 @@ function getMailTransporter() {
   });
 }
 
+function buildMailFrom() {
+  if (!MAIL_FROM_EMAIL) {
+    throw new Error('MAIL_FROM_EMAIL ou GMAIL_USER doit être configuré pour envoyer des courriels');
+  }
+  return `"${HOTEL_BILLING_FROM_NAME}" <${MAIL_FROM_EMAIL}>`;
+}
+
+async function sendMailWithResend(mailOptions) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), MAIL_SEND_TIMEOUT_MS);
+  try {
+    const attachments = (mailOptions.attachments || []).map((attachment) => ({
+      filename: attachment.filename,
+      content: Buffer.isBuffer(attachment.content)
+        ? attachment.content.toString('base64')
+        : Buffer.from(String(attachment.content || '')).toString('base64')
+    }));
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: mailOptions.from || buildMailFrom(),
+        to: Array.isArray(mailOptions.to) ? mailOptions.to : [mailOptions.to],
+        reply_to: mailOptions.replyTo,
+        subject: mailOptions.subject,
+        html: mailOptions.html,
+        text: mailOptions.text,
+        attachments: attachments.length ? attachments : undefined
+      }),
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (_) {
+      data = { message: text };
+    }
+    if (!response.ok) {
+      throw new Error(data.message || data.error || `Resend API error ${response.status}`);
+    }
+    return { messageId: data.id || null };
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error('Le service courriel HTTPS ne répond pas assez vite.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function sendMailWithTimeout(mailOptions) {
+  if (RESEND_API_KEY) {
+    return sendMailWithResend(mailOptions);
+  }
   const transporter = getMailTransporter();
   let timeoutId;
   try {
@@ -1055,7 +1116,7 @@ async function sendInvoiceByEmail(inv, recipientEmail) {
 
   try {
     return await sendMailWithTimeout({
-      from: `${HOTEL_BILLING_FROM_NAME} <${GMAIL_USER}>`,
+      from: buildMailFrom(),
       to: recipientEmail,
       replyTo: GMAIL_USER,
       subject: `Facture ${inv.number} — ${inv.eventName || 'Hôtel La Promenade'}`,
@@ -1751,7 +1812,7 @@ app.get('/api/guests/export', verifyToken, async (req, res) => {
 
 async function sendGuestInvitationByEmail(guest, { subject, text }) {
   return await sendMailWithTimeout({
-    from: `"${HOTEL_BILLING_FROM_NAME}" <${GMAIL_USER}>`,
+    from: buildMailFrom(),
     to: guest.email,
     subject,
     text,
