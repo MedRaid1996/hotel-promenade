@@ -33,6 +33,7 @@ const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
+const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 12000));
 const DEFAULT_SERVICE_CATALOG = [
   { name: 'Traiteur Gastronomique', type: 'Restauration', icon: '🍽️', desc: 'Menu 5 services, buffet ou plats servis à table', priceFrom: 45 },
   { name: 'Audiovisuel Premium', type: 'Audiovisuel', icon: '🎛️', desc: 'Sono, projecteurs, écrans LED, éclairage scénique', priceFrom: 800 },
@@ -926,10 +927,28 @@ function getMailTransporter() {
   return nodemailer.createTransport({
     service: 'gmail',
     auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
-    connectionTimeout: 30000,
-    greetingTimeout: 30000,
-    socketTimeout: 45000,
+    connectionTimeout: Math.min(5000, MAIL_SEND_TIMEOUT_MS),
+    greetingTimeout: Math.min(5000, MAIL_SEND_TIMEOUT_MS),
+    socketTimeout: MAIL_SEND_TIMEOUT_MS,
   });
+}
+
+async function sendMailWithTimeout(mailOptions) {
+  const transporter = getMailTransporter();
+  let timeoutId;
+  try {
+    return await Promise.race([
+      transporter.sendMail(mailOptions),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error('Le service courriel ne répond pas assez vite. Vérifiez les variables GMAIL_USER/GMAIL_APP_PASS et les accès SMTP sur Railway.'));
+        }, MAIL_SEND_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+    transporter.close();
+  }
 }
 
 async function buildInvoicePdfBuffer(inv, services = [], reservation = null) {
@@ -1007,7 +1026,6 @@ async function sendInvoiceByEmail(inv, recipientEmail) {
   const services = await dbAll('SELECT * FROM services WHERE eventId = ?', [inv.eventId]);
   const reservation = await dbGet('SELECT r.*, rm.name as roomName FROM reservations r LEFT JOIN rooms rm ON r.roomId = rm.id WHERE r.eventId = ?', [inv.eventId]);
   const pdfBuffer = await buildInvoicePdfBuffer(inv, services, reservation);
-  const transporter = getMailTransporter();
   const html = `
     <div style="font-family:Georgia,'Times New Roman',serif;background:#f8f4ea;color:#1a1a1a;padding:32px">
       <div style="max-width:700px;margin:0 auto;background:#fffdf8;border:1px solid #d8c38f;border-radius:18px;overflow:hidden">
@@ -1030,7 +1048,7 @@ async function sendInvoiceByEmail(inv, recipientEmail) {
     </div>`;
 
   try {
-    return await transporter.sendMail({
+    return await sendMailWithTimeout({
       from: `${HOTEL_BILLING_FROM_NAME} <${GMAIL_USER}>`,
       to: recipientEmail,
       replyTo: GMAIL_USER,
@@ -1726,8 +1744,7 @@ app.get('/api/guests/export', verifyToken, async (req, res) => {
 });
 
 async function sendGuestInvitationByEmail(guest, { subject, text }) {
-  const transporter = getMailTransporter();
-  return await transporter.sendMail({
+  return await sendMailWithTimeout({
     from: `"${HOTEL_BILLING_FROM_NAME}" <${GMAIL_USER}>`,
     to: guest.email,
     subject,
