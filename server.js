@@ -31,7 +31,7 @@ const BOOTSTRAP_ADMIN_PASSWORD = process.env.BOOTSTRAP_ADMIN_PASSWORD;
 const SYNC_QUICK_LOGIN_USERS = process.env.SYNC_QUICK_LOGIN_USERS !== 'false';
 const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!';
 const GMAIL_USER = process.env.GMAIL_USER || '';
-const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
+const GMAIL_APP_PASS = (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '');
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
 const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 30000));
 const DEFAULT_SERVICE_CATALOG = [
