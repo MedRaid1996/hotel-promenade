@@ -32,6 +32,9 @@ const SYNC_QUICK_LOGIN_USERS = process.env.SYNC_QUICK_LOGIN_USERS !== 'false';
 const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!';
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_APP_PASS = (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '');
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
 const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 30000));
 const DEFAULT_SERVICE_CATALOG = [
@@ -925,7 +928,10 @@ function getMailTransporter() {
     throw new Error('GMAIL_USER ou GMAIL_APP_PASS manquant dans .env');
   }
   return nodemailer.createTransport({
-    service: 'gmail',
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_SECURE,
+    requireTLS: !SMTP_SECURE,
     auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
     connectionTimeout: Math.min(5000, MAIL_SEND_TIMEOUT_MS),
     greetingTimeout: Math.min(5000, MAIL_SEND_TIMEOUT_MS),
