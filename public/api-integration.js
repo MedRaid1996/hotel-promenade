@@ -67,7 +67,7 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetchWithTimeout(`${API_BASE}${endpoint}`, options, 18000);
+  const response = await fetchWithTimeout(`${API_BASE}${endpoint}`, options, 35000);
 
   if (response.status === 401 || response.status === 403) {
     apiLogout();
@@ -106,7 +106,7 @@ async function apiUpload(endpoint, formData) {
     method: 'POST',
     headers,
     body: formData
-  }, 20000);
+  }, 35000);
 
   const data = await response.json();
   if (!response.ok) {

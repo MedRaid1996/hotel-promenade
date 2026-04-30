@@ -33,7 +33,7 @@ const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!
 const GMAIL_USER = process.env.GMAIL_USER || '';
 const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
 const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
-const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 12000));
+const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 30000));
 const DEFAULT_SERVICE_CATALOG = [
   { name: 'Traiteur Gastronomique', type: 'Restauration', icon: '🍽️', desc: 'Menu 5 services, buffet ou plats servis à table', priceFrom: 45 },
   { name: 'Audiovisuel Premium', type: 'Audiovisuel', icon: '🎛️', desc: 'Sono, projecteurs, écrans LED, éclairage scénique', priceFrom: 800 },
