@@ -31,14 +31,15 @@ const BOOTSTRAP_ADMIN_PASSWORD = process.env.BOOTSTRAP_ADMIN_PASSWORD;
 const SYNC_QUICK_LOGIN_USERS = process.env.SYNC_QUICK_LOGIN_USERS !== 'false';
 const DEMO_USER_PASSWORD = process.env.DEMO_USER_PASSWORD || 'PromenadeDemo2026!';
 const GMAIL_USER = process.env.GMAIL_USER || '';
-const GMAIL_APP_PASS = (process.env.GMAIL_APP_PASS || '').replace(/\s+/g, '');
+const GMAIL_APP_PASS = process.env.GMAIL_APP_PASS || '';
+const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
 const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
-const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
-const MAIL_FROM_EMAIL = process.env.MAIL_FROM_EMAIL || GMAIL_USER;
-const HOTEL_BILLING_FROM_NAME = process.env.HOTEL_BILLING_FROM_NAME || 'Hôtel La Promenade';
-const MAIL_SEND_TIMEOUT_MS = Math.max(3000, Number(process.env.MAIL_SEND_TIMEOUT_MS || 30000));
+const SMTP_SECURE = String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || '';
+const GMAIL_SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 const DEFAULT_SERVICE_CATALOG = [
   { name: 'Traiteur Gastronomique', type: 'Restauration', icon: '🍽️', desc: 'Menu 5 services, buffet ou plats servis à table', priceFrom: 45 },
   { name: 'Audiovisuel Premium', type: 'Audiovisuel', icon: '🎛️', desc: 'Sono, projecteurs, écrans LED, éclairage scénique', priceFrom: 800 },
@@ -926,96 +927,162 @@ function validateServiceInput(payload) {
   };
 }
 
-function getMailTransporter() {
+function getMailTransporter(config = {}) {
   if (!GMAIL_USER || !GMAIL_APP_PASS) {
     throw new Error('GMAIL_USER ou GMAIL_APP_PASS manquant dans .env');
   }
   return nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_SECURE,
-    requireTLS: !SMTP_SECURE,
+    host: config.host || SMTP_HOST,
+    port: config.port || SMTP_PORT,
+    secure: config.secure ?? SMTP_SECURE,
     auth: { user: GMAIL_USER, pass: GMAIL_APP_PASS },
-    connectionTimeout: Math.min(5000, MAIL_SEND_TIMEOUT_MS),
-    greetingTimeout: Math.min(5000, MAIL_SEND_TIMEOUT_MS),
-    socketTimeout: MAIL_SEND_TIMEOUT_MS,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 25000,
+    requireTLS: (config.port || SMTP_PORT) === 587,
   });
 }
 
-function buildMailFrom() {
-  if (!MAIL_FROM_EMAIL) {
-    throw new Error('MAIL_FROM_EMAIL ou GMAIL_USER doit être configuré pour envoyer des courriels');
-  }
-  return `"${HOTEL_BILLING_FROM_NAME}" <${MAIL_FROM_EMAIL}>`;
+function hasGmailApiConfig() {
+  return Boolean(GMAIL_USER && GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN);
 }
 
-async function sendMailWithResend(mailOptions) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), MAIL_SEND_TIMEOUT_MS);
-  try {
-    const attachments = (mailOptions.attachments || []).map((attachment) => ({
-      filename: attachment.filename,
-      content: Buffer.isBuffer(attachment.content)
-        ? attachment.content.toString('base64')
-        : Buffer.from(String(attachment.content || '')).toString('base64')
-    }));
-    const response = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${RESEND_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        from: mailOptions.from || buildMailFrom(),
-        to: Array.isArray(mailOptions.to) ? mailOptions.to : [mailOptions.to],
-        reply_to: mailOptions.replyTo,
-        subject: mailOptions.subject,
-        html: mailOptions.html,
-        text: mailOptions.text,
-        attachments: attachments.length ? attachments : undefined
-      }),
-      signal: controller.signal
-    });
-    const text = await response.text();
-    let data = {};
+function hasSmtpMailConfig() {
+  return Boolean(GMAIL_USER && GMAIL_APP_PASS);
+}
+
+function getMailTransportConfigs() {
+  const configs = [
+    { host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_SECURE },
+    { host: 'smtp.gmail.com', port: 587, secure: false },
+    { host: 'smtp.gmail.com', port: 465, secure: true }
+  ];
+  const seen = new Set();
+  return configs.filter((config) => {
+    const key = `${config.host}:${config.port}:${config.secure}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function encodeMailHeader(value = '') {
+  const text = String(value);
+  return /^[\x00-\x7F]*$/.test(text)
+    ? text
+    : `=?UTF-8?B?${Buffer.from(text, 'utf8').toString('base64')}?=`;
+}
+
+function toBase64Url(value) {
+  return Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function buildMimeMessage(mailOptions) {
+  const mixedBoundary = `mixed_${crypto.randomBytes(12).toString('hex')}`;
+  const altBoundary = `alt_${crypto.randomBytes(12).toString('hex')}`;
+  const recipients = Array.isArray(mailOptions.to) ? mailOptions.to.join(', ') : mailOptions.to;
+  const headers = [
+    `From: "${encodeMailHeader(HOTEL_BILLING_FROM_NAME)}" <${GMAIL_USER}>`,
+    `To: ${recipients}`,
+    mailOptions.replyTo ? `Reply-To: ${mailOptions.replyTo}` : null,
+    `Subject: ${encodeMailHeader(mailOptions.subject || '')}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${mixedBoundary}"`
+  ].filter(Boolean);
+  const parts = [
+    `--${mixedBoundary}`,
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
+    '',
+    `--${altBoundary}`,
+    'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(mailOptions.text || '', 'utf8').toString('base64'),
+    `--${altBoundary}`,
+    'Content-Type: text/html; charset="UTF-8"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(mailOptions.html || mailOptions.text || '', 'utf8').toString('base64'),
+    `--${altBoundary}--`
+  ];
+
+  (mailOptions.attachments || []).forEach((attachment) => {
+    const content = Buffer.isBuffer(attachment.content)
+      ? attachment.content
+      : Buffer.from(String(attachment.content || ''), 'utf8');
+    const filename = attachment.filename || 'piece-jointe';
+    parts.push(
+      `--${mixedBoundary}`,
+      `Content-Type: ${attachment.contentType || 'application/octet-stream'}; name="${encodeMailHeader(filename)}"`,
+      'Content-Transfer-Encoding: base64',
+      `Content-Disposition: attachment; filename="${encodeMailHeader(filename)}"`,
+      '',
+      content.toString('base64')
+    );
+  });
+  parts.push(`--${mixedBoundary}--`);
+  return `${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`;
+}
+
+async function getGmailApiAccessToken() {
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: GOOGLE_REFRESH_TOKEN,
+      grant_type: 'refresh_token',
+      scope: GMAIL_SEND_SCOPE
+    })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.access_token) {
+    throw new Error(payload.error_description || payload.error || `Gmail OAuth HTTP ${response.status}`);
+  }
+  return payload.access_token;
+}
+
+async function sendMailWithGmailApi(mailOptions) {
+  if (!hasGmailApiConfig()) {
+    throw new Error('Configuration Gmail API manquante: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET ou GOOGLE_REFRESH_TOKEN.');
+  }
+  const accessToken = await getGmailApiAccessToken();
+  const raw = toBase64Url(buildMimeMessage(mailOptions));
+  const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${encodeURIComponent(GMAIL_USER)}/messages/send`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ raw })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error?.message || `Gmail API HTTP ${response.status}`);
+  }
+  return { messageId: payload.id || null };
+}
+
+async function sendMailWithFallback(mailOptions) {
+  if (hasGmailApiConfig()) {
+    return await sendMailWithGmailApi(mailOptions);
+  }
+
+  let lastError;
+  for (const config of getMailTransportConfigs()) {
     try {
-      data = text ? JSON.parse(text) : {};
-    } catch (_) {
-      data = { message: text };
+      return await getMailTransporter(config).sendMail(mailOptions);
+    } catch (error) {
+      lastError = error;
+      console.warn(`Email attempt failed via ${config.host}:${config.port}: ${error.message}`);
     }
-    if (!response.ok) {
-      throw new Error(data.message || data.error || `Resend API error ${response.status}`);
-    }
-    return { messageId: data.id || null };
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      throw new Error('Le service courriel HTTPS ne répond pas assez vite.');
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
   }
-}
-
-async function sendMailWithTimeout(mailOptions) {
-  if (RESEND_API_KEY) {
-    return sendMailWithResend(mailOptions);
-  }
-  const transporter = getMailTransporter();
-  let timeoutId;
-  try {
-    return await Promise.race([
-      transporter.sendMail(mailOptions),
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error('Le service courriel ne répond pas assez vite. Vérifiez les variables GMAIL_USER/GMAIL_APP_PASS et les accès SMTP sur Railway.'));
-        }, MAIL_SEND_TIMEOUT_MS);
-      })
-    ]);
-  } finally {
-    clearTimeout(timeoutId);
-    transporter.close();
-  }
+  throw lastError;
 }
 
 async function buildInvoicePdfBuffer(inv, services = [], reservation = null) {
@@ -1115,8 +1182,8 @@ async function sendInvoiceByEmail(inv, recipientEmail) {
     </div>`;
 
   try {
-    return await sendMailWithTimeout({
-      from: buildMailFrom(),
+    return await sendMailWithFallback({
+      from: `${HOTEL_BILLING_FROM_NAME} <${GMAIL_USER}>`,
       to: recipientEmail,
       replyTo: GMAIL_USER,
       subject: `Facture ${inv.number} — ${inv.eventName || 'Hôtel La Promenade'}`,
@@ -1811,8 +1878,8 @@ app.get('/api/guests/export', verifyToken, async (req, res) => {
 });
 
 async function sendGuestInvitationByEmail(guest, { subject, text }) {
-  return await sendMailWithTimeout({
-    from: buildMailFrom(),
+  return await sendMailWithFallback({
+    from: `"${HOTEL_BILLING_FROM_NAME}" <${GMAIL_USER}>`,
     to: guest.email,
     subject,
     text,
@@ -1844,9 +1911,9 @@ app.post('/api/guests/:id/invite', verifyToken, async (req, res) => {
     const customMessage = normalizeText(req.body.message || req.body.customMessage);
     const subject = normalizeText(req.body.subject) || `Invitation - ${guest.eventName || 'Hôtel La Promenade'}`;
     const invitationText = customMessage || `Bonjour ${guest.fname}, vous êtes invité à "${guest.eventName}" le ${guest.date} à ${guest.time}.`;
-    if (!GMAIL_USER || !GMAIL_APP_PASS) {
+    if (!hasGmailApiConfig() && !hasSmtpMailConfig()) {
       return res.status(503).json({
-        error: 'Envoi courriel non configuré. Ajoutez GMAIL_USER et GMAIL_APP_PASS dans les variables Railway/.env, puis redéployez.'
+        error: 'Envoi courriel non configuré. Ajoutez les variables Gmail API ou GMAIL_USER/GMAIL_APP_PASS, puis redéployez.'
       });
     }
     let mailInfo;

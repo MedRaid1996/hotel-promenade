@@ -23,6 +23,12 @@ function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function futureDate(days = 30) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
 async function api(pathname, options = {}) {
   const response = await fetch(`${baseUrl}${pathname}`, options);
   const contentType = response.headers.get('content-type') || '';
@@ -175,6 +181,7 @@ test('chat lists active event names instead of confusing name with count', async
   const token = await login('admin@lapromenade.com', 'AdminFallbackPass123!');
   const stamp = Date.now();
   const eventName = `Nom Actif Concierge ${stamp}`;
+  const eventDate = futureDate(30);
 
   const created = await api('/api/chat', {
     method: 'POST',
@@ -183,7 +190,7 @@ test('chat lists active event names instead of confusing name with count', async
       'Authorization': `Bearer ${token}`
     },
     body: JSON.stringify({
-      messages: [{ role: 'user', content: `Creer un evenement ${eventName} le 2026-06-10 a 10:00` }]
+      messages: [{ role: 'user', content: `Creer un evenement ${eventName} le ${eventDate} a 10:00` }]
     })
   });
 
@@ -274,6 +281,7 @@ test('chat fallback creates events and reports the right total', async () => {
   const stamp = Date.now();
 
   for (const index of [1, 2, 3]) {
+    const eventDate = futureDate(40 + index);
     const created = await api('/api/chat', {
       method: 'POST',
       headers: {
@@ -281,7 +289,7 @@ test('chat fallback creates events and reports the right total', async () => {
         'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({
-        messages: [{ role: 'user', content: `Créer un événement Test Concierge ${stamp}-${index} le 2026-06-0${index} à 10:00` }]
+        messages: [{ role: 'user', content: `Créer un événement Test Concierge ${stamp}-${index} le ${eventDate} à 10:00` }]
       })
     });
     assert.equal(created.response.status, 200, JSON.stringify(created.body));
@@ -313,6 +321,7 @@ test('chat fallback can list and delete an invited guest by name', async () => {
   const eventName = `Invite Delete Event ${stamp}`;
   const guestFirst = `Alice${stamp}`;
   const guestLast = 'Suppression';
+  const eventDate = futureDate(50);
 
   const created = await api('/api/chat', {
     method: 'POST',
@@ -321,7 +330,7 @@ test('chat fallback can list and delete an invited guest by name', async () => {
       'Authorization': `Bearer ${token}`
     },
     body: JSON.stringify({
-      messages: [{ role: 'user', content: `Creer un evenement ${eventName} le 2026-07-10 a 11:00` }]
+      messages: [{ role: 'user', content: `Creer un evenement ${eventName} le ${eventDate} a 11:00` }]
     })
   });
   assert.equal(created.response.status, 200, JSON.stringify(created.body));

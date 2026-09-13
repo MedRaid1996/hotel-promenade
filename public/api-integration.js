@@ -52,7 +52,7 @@ async function fetchWithTimeout(resource, options = {}, timeoutMs = 12000) {
   }
 }
 
-async function apiRequest(endpoint, method = 'GET', body = null) {
+async function apiRequest(endpoint, method = 'GET', body = null, timeoutMs = 18000) {
   const options = {
     method,
     headers: {
@@ -67,7 +67,7 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
     options.body = JSON.stringify(body);
   }
 
-  const response = await fetchWithTimeout(`${API_BASE}${endpoint}`, options, 35000);
+  const response = await fetchWithTimeout(`${API_BASE}${endpoint}`, options, timeoutMs);
 
   if (response.status === 401 || response.status === 403) {
     apiLogout();
@@ -106,7 +106,7 @@ async function apiUpload(endpoint, formData) {
     method: 'POST',
     headers,
     body: formData
-  }, 35000);
+  }, 20000);
 
   const data = await response.json();
   if (!response.ok) {
@@ -201,7 +201,7 @@ async function fetchGuests(params = {}) {
 async function createGuest(data) { return apiRequest('/guests', 'POST', data); }
 async function updateGuest(id, data) { return apiRequest(`/guests/${id}`, 'PUT', data); }
 async function deleteGuest(id) { return apiRequest(`/guests/${id}`, 'DELETE'); }
-async function sendInvitation(id, data = {}) { return apiRequest(`/guests/${id}/invite`, 'POST', data); }
+async function sendInvitation(id, data = {}) { return apiRequest(`/guests/${id}/invite`, 'POST', data, 60000); }
 
 async function importGuests(file, eventId) {
   const fd = new FormData();
